@@ -26,11 +26,12 @@ export function canBounce(
   const targetCenter = getCenterTile(x2, y2, size2);
   const sourceScanTiles = isOddSize(size) ? [sourceCenter] : getAllTiles(x, y, size);
   const targetTiles = getAllTiles(x2, y2, size2);
+  const targetClosestTile = getClosestTile(sourceCenter, x2, y2, size2);
 
   return (
     sourceScanTiles.some((tile) => isInRadius(tile, targetCenter, BOUNCE_RADIUS)) &&
     targetTiles.some((tile) => isInRadius(sourceCenter, tile, TARGET_TILE_RADIUS)) &&
-    hasLineOfSight(sourceCenter, getClosestTile(sourceCenter, x2, y2, size2))
+    (tilesEqual(sourceCenter, targetClosestTile) || hasLineOfSight(sourceCenter, targetClosestTile))
   );
 }
 
@@ -69,4 +70,8 @@ function getClosestTile([x, y]: Tile, targetX: number, targetY: number, targetSi
   const closestX = Math.max(targetX, Math.min(targetX + targetSize - 1, x));
   const closestY = Math.max(targetY - targetSize + 1, Math.min(targetY, y));
   return [closestX, closestY];
+}
+
+function tilesEqual([x, y]: Tile, [x2, y2]: Tile) {
+  return x === x2 && y === y2;
 }
