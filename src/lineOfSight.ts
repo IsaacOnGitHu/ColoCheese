@@ -31,6 +31,8 @@ const MAX_EXPORT_LENGTH = 128;
 const TILE_SIZE = 20;
 const MAP_WIDTH = 34;
 const MAP_HEIGHT = 34;
+// Max range tested for venator LOS (note that this is a post-filter over the venator geometry rules)
+const VENATOR_LOS_RANGE = 10;
 const TICKER_WIDTH = 9;
 const TICKER_START_X = MAP_WIDTH * TILE_SIZE;
 const CANVAS_WIDTH = TICKER_START_X + TICKER_WIDTH * TILE_SIZE;
@@ -1400,7 +1402,11 @@ export class LineOfSight {
         ctx.strokeStyle = "#ff69b4";
         ctx.lineWidth = 5;
         const [sX, sY, sT] = this.mobs[this.mousedOverNpc];
-        if (canBounce(sX, sY, NPC_INFO[sT].size, this.mobs[i][0], this.mobs[i][1], s)) {
+        if (
+          canBounce(sX, sY, NPC_INFO[sT].size, this.mobs[i][0], this.mobs[i][1], s, (from, to) =>
+            this.hasLOS(from[0], from[1], to[0], to[1], 1, VENATOR_LOS_RANGE, false)
+          )
+        ) {
           ctx.strokeRect(x * TILE_SIZE, (y - s + 1) * TILE_SIZE, TILE_SIZE * s, TILE_SIZE * s);
         }
         ctx.lineWidth = 1;

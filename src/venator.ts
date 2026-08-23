@@ -5,6 +5,7 @@ const BOUNCE_RADIUS = 2;
 const TARGET_TILE_RADIUS = 3;
 
 type Tile = [number, number];
+type HasLineOfSight = (from: Tile, to: Tile) => boolean;
 
 const isInRadius = ([x, y]: Tile, [x2, y2]: Tile, radius: number) => {
   const dxAbs = Math.abs(x - x2);
@@ -18,7 +19,8 @@ export function canBounce(
   size: number,
   x2: number,
   y2: number,
-  size2: number
+  size2: number,
+  hasLineOfSight: HasLineOfSight = () => true
 ): boolean {
   const sourceCenter = getCenterTile(x, y, size);
   const targetCenter = getCenterTile(x2, y2, size2);
@@ -27,7 +29,8 @@ export function canBounce(
 
   return (
     sourceScanTiles.some((tile) => isInRadius(tile, targetCenter, BOUNCE_RADIUS)) &&
-    targetTiles.some((tile) => isInRadius(sourceCenter, tile, TARGET_TILE_RADIUS))
+    targetTiles.some((tile) => isInRadius(sourceCenter, tile, TARGET_TILE_RADIUS)) &&
+    hasLineOfSight(sourceCenter, getClosestTile(sourceCenter, x2, y2, size2))
   );
 }
 
@@ -60,4 +63,10 @@ function getAllTiles(x: number, y: number, size: number): Tile[] {
     }
   }
   return res;
+}
+
+function getClosestTile([x, y]: Tile, targetX: number, targetY: number, targetSize: number): Tile {
+  const closestX = Math.max(targetX, Math.min(targetX + targetSize - 1, x));
+  const closestY = Math.max(targetY - targetSize + 1, Math.min(targetY, y));
+  return [closestX, closestY];
 }

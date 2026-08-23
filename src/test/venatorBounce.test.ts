@@ -39,6 +39,34 @@ describe("venator bounce tests", () => {
     expect(canBounce(0, 0, 4, -2, 0, 1)).toBe(false);
   });
 
+  test("checks line-of-sight from the source center tile to the target's closest tile", () => {
+    const losChecks: [Tile, Tile][] = [];
+
+    expect(
+      canBounce(7, 11, 2, 11, 13, 4, (from, to) => {
+        losChecks.push([from, to]);
+        return true;
+      })
+    ).toBe(true);
+    expect(losChecks).toEqual([[[7, 11], [11, 11]]]);
+  });
+
+  test("requires line-of-sight when the bounce geometry passes", () => {
+    expect(canBounce(0, 0, 1, 2, 2, 1, () => false)).toBe(false);
+  });
+
+  test("does not check line-of-sight when the bounce geometry fails", () => {
+    let losChecks = 0;
+
+    expect(
+      canBounce(0, 0, 1, 3, 0, 1, () => {
+        losChecks += 1;
+        return true;
+      })
+    ).toBe(false);
+    expect(losChecks).toBe(0);
+  });
+
   test("matches the simplified rules for all supported size combinations around the source", () => {
     for (const sourceSize of TEST_SIZES) {
       for (const targetSize of TEST_SIZES) {
