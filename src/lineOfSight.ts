@@ -1,7 +1,7 @@
 import { Coordinates, Mob, MobExtra, MobSpec, ReplayData, TapeEntry } from "./types";
 import { blockedTileRanges, DELAY_FIRST_ATTACK_TICKS, MANTICORE, MANTICORE_ATTACKS, MANTICORE_CHARGE_TIME, MANTICORE_DELAY, MANTICORE_PATTERNS, MINOTAUR, MINOTAUR_HEAL_COLOR, MINOTAUR_HEAL_RANGE, MM3_PATTERNS, MODE_PLAYER, NPC_INFO, NPC_TYPES, NpcType, STANDARD_PATTERNS } from "./constants";
 
-import { canBounce } from "./venator";
+import { canBounce, getCenterTile } from "./venator";
 import { computeReplayBounds, convertMobSpecToMob, copyQ, decodeURL, encodeCoordinate, extendBounds, getMobSpec, getReplayURL, getSpawnUrl, record } from "./utils";
 
 const PILLAR_COORDS = [
@@ -206,6 +206,7 @@ export class LineOfSight {
 
   public setShowVenatorBounce = (show: boolean) => {
     this.showVenatorBounce = show;
+    this.onUpdateSubscribers();
   };
   
   private updateUi() {
@@ -1102,6 +1103,27 @@ export class LineOfSight {
       });
     }
 
+    function drawVenatorCenterTile(x: number, y: number, size: number, isSource: boolean) {
+      const [centerX, centerY] = getCenterTile(x, y, size);
+      const tileCenterX = scale(centerX + 0.5);
+      const tileCenterY = scale(centerY + 0.5);
+      const markerRadius = TILE_SIZE * 0.26;
+
+      ctx.save();
+      ctx.fillStyle = isSource ? "#ffd400" : "#ff69b4";
+      ctx.strokeStyle = "#111";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(tileCenterX, tileCenterY - markerRadius);
+      ctx.lineTo(tileCenterX + markerRadius, tileCenterY);
+      ctx.lineTo(tileCenterX, tileCenterY + markerRadius);
+      ctx.lineTo(tileCenterX - markerRadius, tileCenterY);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+      ctx.restore();
+    }
+
     const checkerColor = CHECKER ? "#eee" : "#fff";
     for (var i = 0; i < MAP_WIDTH * MAP_HEIGHT; i++) {
       const x = i % MAP_WIDTH;
@@ -1382,6 +1404,9 @@ export class LineOfSight {
           ctx.strokeRect(x * TILE_SIZE, (y - s + 1) * TILE_SIZE, TILE_SIZE * s, TILE_SIZE * s);
         }
         ctx.lineWidth = 1;
+      }
+      if (this.showVenatorBounce) {
+        drawVenatorCenterTile(x, y, s, this.mousedOverNpc === i);
       }
     }
 
