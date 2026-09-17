@@ -1,0 +1,12 @@
+{
+  // Name must match the Worker in the Cloudflare dashboard, or the build fails.
+  "name": "rough-firefly-5f19",
+  "compatibility_date": "2026-09-17",
+  // Static site: `npm run build` writes dist/, and that's all this Worker serves.
+  "assets": {
+    "directory": "./dist"
+  },
+  // The workers.dev and preview URLs stay off: the site is served from colocheese.com only.
+  "workers_dev": false,
+  "preview_urls": false
+}
