@@ -31,6 +31,41 @@ export const NPC_INFO = {
   [NPC_TYPES.REINFORCEMENT_SHAMAN]: { ..._SHAMAN, id: 6 },
 };
 
+export const NPC_DISPLAY_NAME: Record<number, string> = {
+  [NPC_TYPES.SERPENT_SHAMAN]: "Serpent Shaman",
+  [NPC_TYPES.JAVELIN_COLOSSUS]: "Javelin Colossus",
+  [NPC_TYPES.JAGUAR_WARRIOR]: "Jaguar Warrior",
+  [NPC_TYPES.MANTICORE]: "Manticore",
+  [NPC_TYPES.MINOTAUR]: "Minotaur",
+  [NPC_TYPES.SHOCKWAVE_COLOSSUS]: "Shockwave Colossus",
+  [NPC_TYPES.REINFORCEMENT_SHAMAN]: "Reinforcement Shaman",
+};
+
+// The protection prayer to switch to for a 1v1 against each mob. The Manticore is left out because
+// it cycles all three styles.
+export const NPC_PROTECT_PRAYER: Record<number, string> = {
+  [NPC_TYPES.SERPENT_SHAMAN]: "mage",
+  [NPC_TYPES.JAVELIN_COLOSSUS]: "range",
+  [NPC_TYPES.JAGUAR_WARRIOR]: "melee",
+  [NPC_TYPES.MINOTAUR]: "melee",
+  [NPC_TYPES.SHOCKWAVE_COLOSSUS]: "mage",
+  [NPC_TYPES.REINFORCEMENT_SHAMAN]: "mage",
+};
+
+// How far the player can attack, which decides whether an isolated 1v1 is actually winnable.
+// Reach and diagonals are independent: a halberd normally reaches 2 tiles and can hit diagonally,
+// and under the Myopia invocation it drops to 1 tile but keeps the diagonal attack. A standard
+// melee weapon is 1 tile with no diagonals at all.
+export type WeaponMode = "halberdMyopia" | "halberd" | "standard";
+
+export const WEAPON_MODES: Record<WeaponMode, { label: string; reach: number; diagonals: boolean }> = {
+  halberdMyopia: { label: "Halberd + Myopia (1 tile)", reach: 1, diagonals: true },
+  halberd: { label: "Halberd (2 tiles)", reach: 2, diagonals: true },
+  standard: { label: "Other melee", reach: 1, diagonals: false },
+};
+
+export const DEFAULT_WEAPON_MODE: WeaponMode = "halberdMyopia";
+
 export const MODE_PLAYER = 0;
 
 export const MANTICORE = NPC_TYPES.MANTICORE;

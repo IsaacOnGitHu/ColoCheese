@@ -1,19 +1,38 @@
-# Colosseum LOS Tool
+# 🧀 Colo Cheese
 
-[![Netlify Status](https://api.netlify.com/api/v1/badges/a1378f9d-de1e-415d-9cda-860dcbbb21ab/deploy-status)](https://app.netlify.com/sites/osrs-colosseum/deploys)
+Tank path solver for the OSRS Fortis Colosseum — **[colocheese.com](https://colocheese.com)**
 
-Originally written by [Backseat](https://bistools.github.io/inferno.html) and [iFreedive](https://ifreedive-osrs.github.io/).
+No-flick tank paths: load your stack, hit Solve, get a safe 1v1.
 
-## Installation
+## What it does
 
-    npm install
+Survive the spawn, get safe behind a pillar, then load your stack (paste a RuneLite plugin link, or
+drag the mobs and yourself onto the map) and hit **Solve Tank Path**. It works out a click route
+that pulls exactly one NPC onto you, so you can fight it 1v1 without flicking.
+
+It goes for, in order:
+
+1. Minotaurs first, unless the other NPC is out of its healing range
+2. A target that's actually in melee reach (halberd, halberd + myopia, or normal melee)
+3. Fewest clicks
+4. Least damage
+
+It also checks that nothing else can see your end tile (mages included), that you aren't left in the
+open once your 1v1 dies, that the plan survives a click landing a tick late, Solarflare orbs, and
+Javelin specials that force you off your tile. Damage is estimated from your own defence bonuses,
+Justiciar and Piety.
+
+The whole plan can be stepped through tick by tick to see how the NPCs react.
+
+## Credit
+
+Built on the Colosseum line of sight tool ([los.colosim.com](https://los.colosim.com)), originally
+written by [Backseat](https://bistools.github.io/inferno.html) and
+[iFreedive](https://ifreedive-osrs.github.io/). Further built upon for cheese tanking.
 
 ## Development
 
-    npm run dev
-
-Then navigate to http://localhost:5173
-
-## Testing
-
+    npm install
+    npm run dev     # http://localhost:5173
     npm run test
+    npm run build   # output in dist/

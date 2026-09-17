@@ -1,8 +1,21 @@
 import { Coordinates, Mob, MobExtra, MobSpec, ReplayData, TapeEntry } from "./types";
-import { blockedTileRanges, DELAY_FIRST_ATTACK_TICKS, MANTICORE, MANTICORE_ATTACKS, MANTICORE_CHARGE_TIME, MANTICORE_DELAY, MANTICORE_PATTERNS, MINOTAUR, MINOTAUR_HEAL_COLOR, MINOTAUR_HEAL_RANGE, MM3_PATTERNS, MODE_PLAYER, NPC_INFO, NPC_TYPES, NpcType, STANDARD_PATTERNS } from "./constants";
+import { blockedTileRanges, DEFAULT_WEAPON_MODE, DELAY_FIRST_ATTACK_TICKS, MANTICORE, MANTICORE_ATTACKS, MANTICORE_CHARGE_TIME, MANTICORE_DELAY, MANTICORE_PATTERNS, MINOTAUR, MINOTAUR_HEAL_COLOR, MINOTAUR_HEAL_RANGE, MM3_PATTERNS, MODE_PLAYER, NPC_DISPLAY_NAME, NPC_INFO, NPC_PROTECT_PRAYER, NPC_TYPES, NpcType, STANDARD_PATTERNS, WEAPON_MODES, WeaponMode } from "./constants";
 
 import { canBounce, getCenterTile } from "./venator";
+import { buildPathTree, pathTo, pathToFirst, runTicks, type PathTree } from "./playerPathing";
+import {
+  DEFAULT_PLAYER_DEFENCE,
+  expectedDamagePerTick,
+  isPrayedAgainst,
+  type PlayerDefence,
+  type PrayerStyle,
+} from "./damageModel";
 import { computeReplayBounds, convertMobSpecToMob, copyQ, decodeURL, encodeCoordinate, extendBounds, getMobSpec, getReplayURL, getSpawnUrl, record } from "./utils";
+
+/** One click in a solved route: the tile to click, and how many ticks to stand on it afterwards. */
+export type SolveClick = { tile: Coordinates; wait: number; early?: boolean };
+/** `steps` is the tile-by-tile walk (for drawing); `ticks` is the position after each tick. */
+type SolveRoute = { clicks: SolveClick[]; steps: Coordinates[]; ticks: Coordinates[] };
 
 const PILLAR_COORDS = [
   [8, 10],
@@ -74,6 +87,23 @@ export class LineOfSight {
   fromWaveStart: boolean = false;
   mantimayhem3: boolean = false;
   showVenatorBounce: boolean = false;
+
+  // Which weapon the solve assumes, which decides whether an isolated 1v1 is actually winnable.
+  weaponMode: WeaponMode = DEFAULT_WEAPON_MODE;
+
+  // Outcome of the last solve, surfaced in the sidebar. Kept as primitives so getUiState()'s
+  // shallow change-detection keeps working.
+  solveSummary: string | null = null;
+  solveTone: "good" | "warn" | "bad" | null = null;
+  solveRoute: string | null = null;
+  solveEndAttackable: boolean = false;
+
+  // Solarflare invocation: an orb orbits every pillar, so solves should avoid ending next to one.
+  solarflare: boolean = false;
+
+  // Your defences for the damage estimate, and the prayer you keep up while running a route.
+  playerDefence: PlayerDefence = { ...DEFAULT_PLAYER_DEFENCE };
+  runPrayer: PrayerStyle = "magic";
 
   replay: Coordinates[] | null = null;
   replayTick: number | null = null;
@@ -210,6 +240,49 @@ export class LineOfSight {
     this.showVenatorBounce = show;
     this.onUpdateSubscribers();
   };
+
+  public setWeaponMode = (mode: WeaponMode) => {
+    this.weaponMode = mode;
+    this.clearSolveResult();
+    this.onUpdateSubscribers();
+  };
+
+  public applySettings = (settings: {
+    weaponMode: WeaponMode;
+    solarflare: boolean;
+    runPrayer: PrayerStyle;
+    defence: PlayerDefence;
+  }) => {
+    this.weaponMode = settings.weaponMode;
+    this.solarflare = settings.solarflare;
+    this.runPrayer = settings.runPrayer;
+    this.playerDefence = { ...settings.defence };
+    this.clearSolveResult();
+    this.drawWave();
+    this.onUpdateSubscribers();
+  };
+
+  public setSolarflare = (on: boolean) => {
+    this.solarflare = on;
+    this.clearSolveResult();
+    this.drawWave();
+    this.onUpdateSubscribers();
+  };
+
+  private clearSolveResult() {
+    this.solveSummary = null;
+    this.solveTone = null;
+    this.solveRoute = null;
+    this.solveEndAttackable = false;
+    this.suggestedStartHidden = false;
+  }
+
+  // The Solarflare orb is one tile circling each pillar, so every tile touching a pillar (diagonals
+  // included) is in its path.
+  private isOnSolarflareOrbit(x: number, y: number) {
+    if (this.isPillar(x, y)) return false;
+    return PILLAR_COORDS.some(([px, py]) => x >= px - 1 && x <= px + 3 && y >= py - 3 && y <= py + 1);
+  }
   
   private updateUi() {
     // currently, we always fire subscriber events
@@ -225,7 +298,13 @@ export class LineOfSight {
       hasReplay: !!this.replay && this.replayTick !== null && !!this.replay[this.replayTick],
       replayLength: this.replay?.length ?? null,
       canSaveReplay: !this.replayAuto && this.tape.length > 0 && this.tape.length <= 32,
-      replayTick: this.replayTick ?? 0
+      replayTick: this.replayTick ?? 0,
+      weaponMode: this.weaponMode,
+      solveSummary: this.solveSummary,
+      solveTone: this.solveTone,
+      solveRoute: this.solveRoute,
+      startHidden: this.suggestedStartHidden,
+      solarflare: this.solarflare,
     }
     // check if any UI state has changed
     if (!this._lastUiState || Object.entries(uiState).some(([k, v]) => this._lastUiState[k] !== v)) {
@@ -294,6 +373,9 @@ export class LineOfSight {
         const endY = Math.min(y + 1, this.tape.length);
         this.tapeSelectionRange = [this.tapeSelectionRange[0], endY];
       }
+    }
+    if (this.draggingNpcIndex !== null) {
+       this.suggestedPath = null; 
     }
     this.draggingNpcIndex = null;
     this.draggingNpcOffset = null;
@@ -541,6 +623,7 @@ export class LineOfSight {
   }
 
   private removeMob(index: number) {
+    this.suggestedPath = null;
     this.mobs.splice(index, 1);
     this.tape = this.tape.map((entries) => {
       return entries.filter((_mobData, i) => i !== index);
@@ -555,7 +638,11 @@ export class LineOfSight {
     y2: number,
     s = 1,
     r = 1,
-    isNPC = false
+    isNPC = false,
+    // Range 1 normally means the strict orthogonal melee rule. A halberd under Myopia is still
+    // reach 1 but can attack diagonally, so it takes the generic line-of-sight path instead,
+    // which treats range as chebyshev distance and so covers all 8 surrounding tiles.
+    allowDiagonal = false
   ): boolean {
     const dx = x2 - x1;
     const dy = y2 - y1;
@@ -567,7 +654,7 @@ export class LineOfSight {
       return false;
     }
     //assume range 1 is melee
-    if (r == 1) {
+    if (r == 1 && !allowDiagonal) {
       return (
         (dx < s && dx >= 0 && (dy == 1 || dy == -s)) ||
         (dy > -s && dy <= 0 && (dx == -1 || dx == s))
@@ -576,7 +663,7 @@ export class LineOfSight {
     if (isNPC) {
       var tx = Math.max(x1, Math.min(x1 + s - 1, x2));
       var ty = Math.max(y1 - s + 1, Math.min(y1, y2));
-      return this.hasLOS(x2, y2, tx, ty, 1, r, false);
+      return this.hasLOS(x2, y2, tx, ty, 1, r, false, allowDiagonal);
     }
     const dxAbs = Math.abs(dx);
     const dyAbs = Math.abs(dy);
@@ -641,39 +728,6 @@ export class LineOfSight {
     return true;
   }
 
-  private legalPosition(x: number, y: number, size: number, index: number) {
-    if (y - (size - 1) < 0 || x + (size - 1) > MAP_WIDTH) {
-      return false;
-    }
-    var collision = false;
-    for (var i = 0; i < PILLAR_COORDS.length; i++) {
-      if (this.doesCollide(x, y, size, PILLAR_COORDS[i][0], PILLAR_COORDS[i][1], 3)) {
-        return false;
-      }
-    }
-    // test collisions with walls
-    for (var yy = y - size + 1; yy <= y; yy++) {
-      const ranges = blockedTileRanges[yy];
-      for (var j = 0; j < ranges.length; ++j) {
-        const range = ranges[j];
-        if (x + size > range[0] && x < range[1]) {
-          return false;
-        }
-      }
-    }
-    for (var i = 0; i < this.mobs.length; i++) {
-      if (this.mobs[i][2] < 8) {
-        if (
-          i != index &&
-          this.doesCollide(x, y, size, this.mobs[i][0], this.mobs[i][1], NPC_INFO[this.mobs[i][2]].size)
-        ) {
-          return false;
-        }
-      }
-    }
-    return !collision;
-  }
-
   private sortMobs() {
     this.mobs = this.mobs.sort(function (a, b) {
       const aId = NPC_INFO[a[2]].id;
@@ -683,6 +737,8 @@ export class LineOfSight {
   }
 
   public place() {
+    this.suggestedPath = null;
+    this.clearSolveResult();
     if (this.cursorLocation) {
       if (this.mode > 0) {
         //x y mode ox oy cooldown extra
@@ -726,15 +782,15 @@ export class LineOfSight {
 
   private advanceReplay() {
     if (this.replay && this.replayTick !== null) {
-      if (this.replay[this.replayTick]) {
-        this.selected = this.replay[this.replayTick];
-      } else {
-        this.reset();
-      }
+      // Past the end of the route the player holds the last tile, so you can keep stepping to watch
+      // the fight once you've arrived. Reset is what starts the route again.
+      this.selected = this.replay[Math.min(this.replayTick, this.replay.length - 1)];
       this.replayTick++;
       if (this.replayAuto) {
         clearTimeout(this.replayAuto);
-        this.replayAuto = setTimeout(() => this.doAutoTick(), 600);
+        // Play pauses the moment the route finishes; pressing it again keeps going from the end tile.
+        this.replayAuto = this.replayTick === this.replay.length ? null : setTimeout(() => this.doAutoTick(), 600);
+        if (!this.replayAuto) this.updateUi();
       }
     }
   }
@@ -756,19 +812,10 @@ export class LineOfSight {
           if (this.doesCollide(dx, dy, s, this.selected[0], this.selected[1], 1)) {
             dy = mob[1];
           }
-          // 1x1 cannot cut corners around pillars for some reason
-          if (
-            this.legalPosition(dx, dy, s, i) &&
-            (s > 1 ||
-              (this.legalPosition(dx, y, s, i) && this.legalPosition(x, dy, s, i)))
-          ) {
-            // move diagonally
-            mob[0] = dx;
-            mob[1] = dy;
-          } else if (this.legalPosition(dx, y, s, i)) {
-            mob[0] = dx;
-          } else if (this.legalPosition(x, dy, s, i)) {
-            mob[1] = dy;
+          const step = this.npcStep(x, y, s, i, dx, dy, this.mobs);
+          if (step) {
+            mob[0] = step[0];
+            mob[1] = step[1];
           }
         }
       }
@@ -991,6 +1038,8 @@ export class LineOfSight {
   }
 
   public remove() {
+    this.suggestedPath = null;
+    this.clearSolveResult();
     this.mobs = [];
     this.stopReplay();
     this.selected = [...B5_ORIGIN_TILE];
@@ -1345,6 +1394,18 @@ export class LineOfSight {
       );
       ctx.globalAlpha = 1;
     }
+    if (this.solarflare) {
+      ctx.fillStyle = "#ff9800";
+      ctx.globalAlpha = 0.3;
+      for (let y = 0; y < MAP_HEIGHT; y++) {
+        for (let x = 0; x < MAP_WIDTH; x++) {
+          if (this.isOnSolarflareOrbit(x, y)) {
+            ctx.fillRect(x * TILE_SIZE, y * TILE_SIZE, TILE_SIZE, TILE_SIZE);
+          }
+        }
+      }
+      ctx.globalAlpha = 1;
+    }
     // mobs
     const minotaurs = this.mobs.filter((m) => m[2] === MINOTAUR);
     for (var i = 0; i < this.mobs.length; i++) {
@@ -1422,7 +1483,964 @@ export class LineOfSight {
     ctx.fillStyle = "red";
     ctx.fillText("North", (MAP_WIDTH / 2) * TILE_SIZE, 4);
     ctx.fillStyle = "white";
-    ctx.fillText("South", (MAP_WIDTH / 2) * TILE_SIZE, (MAP_HEIGHT - 1) * TILE_SIZE + 4);
+  ctx.fillText("South", (MAP_WIDTH / 2) * TILE_SIZE, (MAP_HEIGHT - 1) * TILE_SIZE + 4);
+    
+    // Hook to draw the predictive path on the canvas
+    this.drawSuggestedPath();
+  }
+
+  public suggestedPath: Coordinates[] | null = null;
+  public suggestedClicks: SolveClick[] = [];
+  // The first click is a walk to a hidden tile to start the route from, drawn as "S".
+  public suggestedStartHidden = false;
+
+  public solveAndDrawTankPath() {
+    const start: Coordinates = [this.selected[0], this.selected[1]];
+    // A fragile plan still beats hiding (30000), but a sturdy one from a tile over beats it.
+    const FRAGILE_COST = 20000;
+    const FULL_SOLVES_FROM_MOVES = 1;
+    let best = this.findTankPlan(start, this.mobs);
+    let bestTotal = best ? best.score + (best.fragile ? FRAGILE_COST : 0) : Infinity;
+    let lead: ReturnType<LineOfSight["hiddenMoves"]>[number] | null = null;
+
+    // You don't have to start from the tile you're on. Any tile you can walk to without being seen is
+    // just as good a start, and one tile over can turn a tricky solve into an easy one. A quick solve
+    // from each hidden tile ranks them, then the best one gets a full solve. Staying put wins ties.
+    if (!this.fromWaveStart) {
+      const ranked = this.hiddenMoves(start)
+        .map((move) => ({ move, quick: this.findTankPlan(move.at, move.mobs, true) }))
+        .filter((r) => r.quick !== null)
+        .sort((a, b) => a.quick!.score + a.move.cost - (b.quick!.score + b.move.cost));
+      for (const { move, quick } of ranked.slice(0, FULL_SOLVES_FROM_MOVES)) {
+        // The full solve only adds follow-ups and timing checks, so a start whose quick plan doesn't
+        // already beat staying put isn't worth one.
+        if (quick!.score + move.cost >= bestTotal) break;
+        const plan = this.findTankPlan(move.at, move.mobs);
+        if (!plan) continue;
+        const total = plan.score + move.cost + (plan.fragile ? FRAGILE_COST : 0);
+        if (total < bestTotal && (!best || this.isWorthMoving(best, plan))) {
+          best = plan;
+          bestTotal = total;
+          lead = move;
+        }
+      }
+    }
+
+    if (best) {
+      const route = best.route;
+      // The plan from the hidden tile starts by standing there one tick, so the first click's wait
+      // absorbs it.
+      const clicks: SolveClick[] = lead
+        ? [{ tile: lead.at, wait: route.clicks.length ? lead.wait + 1 : 0 }, ...route.clicks]
+        : route.clicks;
+      const steps = lead ? [...lead.steps, ...route.steps.slice(1)] : route.steps;
+      const ticks = lead ? [...lead.ticks, ...route.ticks] : route.ticks;
+      this.suggestedPath = steps;
+      this.suggestedClicks = clicks;
+      this.suggestedStartHidden = lead !== null;
+      // The walk to S isn't counted: nothing can see you and the mobs have settled, so there's no
+      // timing to it. Clicks and ticks are counted from S.
+      const timed = lead ? route : { clicks, ticks };
+      const clickCount = timed.clicks.length;
+      const routeTicks = timed.ticks.length - 1;
+      const walkToStart = lead ? "Start on S. " : "";
+      this.solveRoute =
+        clickCount === 0
+          ? lead
+            ? `${walkToStart}Then stay put.`
+            : "Stay where you are."
+          : `${walkToStart}${lead ? "Then " : ""}${clickCount} click${clickCount === 1 ? "" : "s"}, ${routeTicks} tick${routeTicks === 1 ? "" : "s"}.` +
+            (timed.clicks.some((c) => c.wait > 0) ? " Wait where it says." : "") +
+            ` About ${Math.round(best.damage)} damage on the way.`;
+      this.replay = lead ? [...lead.ticks, ...best.replayPath] : best.replayPath;
+      this.replayTick = 0;
+      this.solveEndAttackable = best.attackable;
+
+      const orbitWarning = best.onOrbit ? " You'll be next to a pillar, watch the Solarflare." : "";
+      if (best.targetType < 0) {
+        this.solveSummary = `No safe 1v1 yet - stay hidden here.${orbitWarning}`;
+        this.solveTone = "warn";
+      } else {
+        const name = NPC_DISPLAY_NAME[best.targetType] ?? "target";
+        const prayer = NPC_PROTECT_PRAYER[best.targetType];
+        const prayerTip = prayer
+          ? ` Pray ${prayer} when you get there.`
+          : best.targetType === MANTICORE
+            ? " Flick its orbs when you get there."
+            : "";
+        const healWarning = best.healed ? " A Minotaur can heal it." : "";
+        const timingWarning = best.fragile ? " Tight timing - click right on the tick." : "";
+        const afterKillWarning = best.exposedAfterKill ? " After the kill the others can reach you, so get back behind a pillar." : "";
+        const dodgeWarning = best.noJavelinDodge ? " Nowhere safe to dodge its javelins." : "";
+        this.solveSummary = `1v1 vs ${name}.${prayerTip}${healWarning}${orbitWarning}${timingWarning}${afterKillWarning}${dodgeWarning}`;
+        this.solveTone =
+          !best.healed && !best.onOrbit && !best.fragile && !best.exposedAfterKill && !best.noJavelinDodge ? "good" : "warn";
+      }
+      this.reset();
+    } else {
+      this.suggestedPath = null;
+      this.suggestedClicks = [];
+      this.solveRoute = null;
+      this.solveEndAttackable = false;
+      this.solveSummary = "No safe 1v1 from here. Step under or freeze.";
+      this.solveTone = "bad";
+      this.updateUi();
+      this.drawWave();
+    }
+  }
+
+  // Moving first is only worth suggesting when it buys something you'd notice. A plan that scores a
+  // little better but plays the same just swaps a good solve for a different one.
+  private isWorthMoving(
+    stay: NonNullable<ReturnType<LineOfSight["findTankPlan"]>>,
+    move: NonNullable<ReturnType<LineOfSight["findTankPlan"]>>,
+  ) {
+    const warned = (p: typeof stay) => p.fragile || p.healed || p.onOrbit || p.exposedAfterKill || p.noJavelinDodge;
+    return (
+      (stay.targetType < 0 && move.targetType >= 0) ||
+      (move.targetType === MINOTAUR && stay.targetType !== MINOTAUR) ||
+      (warned(stay) && !warned(move)) ||
+      // the walk to the hidden tile counts as a click
+      move.route.clicks.length + 1 < stay.route.clicks.length ||
+      stay.damage - move.damage >= 5
+    );
+  }
+
+  // Tiles a few steps away you can walk to without anything seeing you, with the mobs as they'll be
+  // once they've stopped reacting to the move.
+  private hiddenMoves(start: Coordinates) {
+    const MAX_STEPS = 2;
+    const SETTLE_MAX = 15;
+    const CALM_TICKS = 3;
+    // Much less than a click in the solver (1000): you walk there while hidden with no timing to hit,
+    // so it only has to lose ties against staying put.
+    const MOVE_COST = 300;
+    const tree = buildPathTree(start, MAP_WIDTH, MAP_HEIGHT, (x, y) => this.isPillar(x, y));
+    const moves: Array<{ at: Coordinates; mobs: any[]; wait: number; steps: Coordinates[]; ticks: Coordinates[]; cost: number }> = [];
+    for (let y = start[1] - MAX_STEPS; y <= start[1] + MAX_STEPS; y++) {
+      for (let x = start[0] - MAX_STEPS; x <= start[0] + MAX_STEPS; x++) {
+        if ((x === start[0] && y === start[1]) || x < 0 || y < 0 || x >= MAP_WIDTH || y >= MAP_HEIGHT) continue;
+        const leg = pathTo(tree, [x, y]);
+        if (!leg || leg.length - 1 > MAX_STEPS) continue;
+
+        const mobs = JSON.parse(JSON.stringify(this.mobs));
+        if (mobs.some((m: any) => m[2] !== 0 && m[2] < 8 && this.doesCollide(x, y, 1, m[0], m[1], NPC_INFO[m[2]].size))) continue;
+        // Tick 0 is the mobs reacting to the start tile, as in the solver's own simulation.
+        const ticks: Coordinates[] = [start, ...runTicks(leg)];
+        let seen = false;
+        const tick = (px: number, py: number) => {
+          let moved = false;
+          for (let i = 0; i < mobs.length; i++) if (this.simMobStep(mobs, i, px, py)) moved = true;
+          if (this.simSeenBy(mobs, px, py).length > 0) seen = true;
+          return moved;
+        };
+        for (const [px, py] of ticks) {
+          tick(px, py);
+          if (seen) break;
+        }
+        let wait = 0;
+        let calm = 0;
+        while (!seen && calm < CALM_TICKS && wait < SETTLE_MAX) {
+          calm = tick(x, y) ? 0 : calm + 1;
+          ticks.push([x, y]);
+          wait++;
+        }
+        if (seen || calm < CALM_TICKS) continue;
+        moves.push({ at: [x, y], mobs, wait, steps: leg, ticks, cost: MOVE_COST });
+      }
+    }
+    return moves;
+  }
+
+  // One tick of dumb pathing for a simulated mob towards the player, as moveMobs() does it.
+  // Returns whether the mob moved.
+  private simMobStep(mobs: any[], i: number, px: number, py: number, canMove = true, canGainLos = true) {
+    const mob = mobs[i];
+    const t = mob[2];
+    if (t === 0 || t >= 8) return false;
+    const { size: s, range: r } = NPC_INFO[t];
+    if (this.doesCollide(px, py, 1, mob[0], mob[1], s)) return false;
+    if (!canMove || (canGainLos && this.hasLOS(mob[0], mob[1], px, py, s, r, true))) return false;
+    const dx = mob[0] + Math.sign(px - mob[0]);
+    let dy = mob[1] + Math.sign(py - mob[1]);
+    // Mirrors moveMobs(): a mob can't step diagonally onto the player's own tile,
+    // which is exactly the corner-safespot trick this solver is meant to find.
+    // Without this, the preview simulation can predict a mob ends up somewhere
+    // different (and less safe) than it actually will when the path is replayed.
+    if (this.doesCollide(dx, dy, s, px, py, 1)) dy = mob[1];
+    const step = this.npcStep(mob[0], mob[1], s, i, dx, dy, mobs);
+    if (!step) return false;
+    mob[0] = step[0];
+    mob[1] = step[1];
+    return true;
+  }
+
+  private simSeenBy(mobs: any[], px: number, py: number) {
+    const seen: number[] = [];
+    mobs.forEach((m, i) => {
+      if (m[2] !== 0 && m[2] < 8 && this.hasLOS(m[0], m[1], px, py, NPC_INFO[m[2]].size, NPC_INFO[m[2]].range, true)) seen.push(i);
+    });
+    return seen;
+  }
+
+  // The best plan from `start` with the mobs where `mobs` has them, or null if nothing beats giving
+  // up. `quick` skips the follow-up routes and timing checks, for ranking many starts cheaply.
+  private findTankPlan(start: Coordinates, mobs: any[], quick = false) {
+    let minotaurAlive = mobs.some((m: any) => m[2] === MINOTAUR);
+    const { reach: weaponReach, diagonals: weaponDiagonals } = WEAPON_MODES[this.weaponMode];
+
+    // Expected damage each mob type deals per tick while it can hit you, with your run prayer up.
+    const damagePerTick: Record<number, number> = {};
+    const prayedTypes = new Set<number>();
+    for (const type of Object.values(NPC_TYPES)) {
+      damagePerTick[type] = expectedDamagePerTick(type, this.playerDefence, this.runPrayer);
+      if (isPrayedAgainst(type, this.runPrayer)) prayedTypes.add(type);
+    }
+    const SIM_TICKS = 45;
+    // Long routes (a wait, then a late step in) still need time for the mobs to walk over and settle
+    // before the end state is judged, so every route gets at least this many ticks after it ends.
+    const SETTLE_TICKS = 25;
+
+    // A second click is worth it only when it buys a materially better fight: this is roughly 100
+    // ticks of running or 40 points of modelled damage, and far below one tile of lost reach.
+    const CLICK_PENALTY = 1000;
+    // Two threats able to hit you on the same tick is what kills a no-flick tank, and the per-mob
+    // expected damage only adds hits up without seeing them land together. Mobs your run prayer blocks
+    // don't count here. Each extra simultaneous threat on a route tick costs half a click: a couple of
+    // stacked ticks is enough to justify a second click.
+    const STACKED_THREAT_PENALTY = 500;
+    // Solarflare's orb is a single tile circling each pillar. A few ticks on a pillar tile can be
+    // timed around it, so only ending there - standing in its path for the whole fight - costs.
+    // Any off-pillar 1v1 within a tile of reach beats this, but it still beats hiding (30000).
+    const SOLARFLARE_END_PENALTY = 20000;
+
+    // Every candidate is a list of clicks walked with the game's own player pathing, so the replay
+    // is what actually happens when you click those tiles and the click count is exact.
+    const treeCache = new Map<string, PathTree>();
+    const treeFrom = (from: Coordinates) => {
+      const key = `${from[0]},${from[1]}`;
+      let tree = treeCache.get(key);
+      if (!tree) {
+        tree = buildPathTree(from, MAP_WIDTH, MAP_HEIGHT, (x, y) => this.isPillar(x, y));
+        treeCache.set(key, tree);
+      }
+      return tree;
+    };
+    // `early` and `startDelay` only exist to replay a plan with human timing slips: `early` means the
+    // next click lands one tick before you reach this tile, `startDelay` holds the start a few ticks.
+    const buildRoute = (clicks: SolveClick[], startDelay = 0): SolveRoute | null => {
+      const steps: Coordinates[] = [start];
+      const ticks: Coordinates[] = [start];
+      for (let d = 0; d < startDelay; d++) ticks.push(start);
+      let at = start;
+      for (const { tile, wait, early } of clicks) {
+        const leg = pathTo(treeFrom(at), tile);
+        if (!leg) return null;
+        let legTicks = runTicks(leg);
+        if (early && legTicks.length > 1) legTicks = legTicks.slice(0, -1);
+        steps.push(...leg.slice(1));
+        ticks.push(...legTicks);
+        if (legTicks.length) at = legTicks[legTicks.length - 1];
+        for (let w = 0; w < wait; w++) ticks.push(at);
+      }
+      return { clicks, steps, ticks };
+    };
+
+    const routes: SolveRoute[] = [buildRoute([])!];
+
+    // 1. ONE-CLICK RUNS: click any reachable tile and let the game path there.
+    const startTree = treeFrom(start);
+    for (let y = 0; y < MAP_HEIGHT; y++) {
+      for (let x = 0; x < MAP_WIDTH; x++) {
+        if (x === start[0] && y === start[1]) continue;
+        if (startTree.parent[y * MAP_WIDTH + x] === -1) continue;
+        // Ranking a start only needs the nearby runs; the full solve still tries the whole map.
+        if (quick && Math.max(Math.abs(x - start[0]), Math.abs(y - start[1])) > 10) continue;
+        routes.push(buildRoute([{ tile: [x, y], wait: 0 }])!);
+      }
+    }
+
+    // 2. BOOMERANG LURES: click up to 8 tiles out along a straight open line, wait 0-3 ticks,
+    // then click back to the starting tile.
+    for (const [dx, dy] of [[0,1],[0,-1],[1,0],[-1,0],[1,1],[1,-1],[-1,1],[-1,-1]]) {
+      for (let dist = 1; dist <= 8; dist++) {
+        const out: Coordinates = [start[0] + dx * dist, start[1] + dy * dist];
+        if (out[0] < 0 || out[0] >= MAP_WIDTH || out[1] < 0 || out[1] >= MAP_HEIGHT) break;
+        if (this.isPillar(out[0], out[1])) break;
+        for (let wait = 0; wait <= 3; wait++) {
+          const route = buildRoute([{ tile: out, wait }, { tile: start, wait: 0 }]);
+          if (route) routes.push(route);
+        }
+      }
+    }
+
+    // 3. SOLARFLARE TRAP AND STEP OFF: you can still trap on a pillar tile for a few ticks by timing
+    // the orb, then step off before the fight. Stepping off can drag mobs back into range, which the
+    // simulation below catches.
+    if (this.solarflare) {
+      for (let ty = 0; ty < MAP_HEIGHT; ty++) {
+        for (let tx = 0; tx < MAP_WIDTH; tx++) {
+          if (!this.isOnSolarflareOrbit(tx, ty) || startTree.parent[ty * MAP_WIDTH + tx] === -1) continue;
+          if (quick && Math.max(Math.abs(tx - start[0]), Math.abs(ty - start[1])) > 10) continue;
+          for (let dy = -2; dy <= 2; dy++) {
+            for (let dx = -2; dx <= 2; dx++) {
+              const off: Coordinates = [tx + dx, ty + dy];
+              if (off[0] < 0 || off[1] < 0 || off[0] >= MAP_WIDTH || off[1] >= MAP_HEIGHT) continue;
+              if (this.isPillar(off[0], off[1]) || this.isOnSolarflareOrbit(off[0], off[1])) continue;
+              for (const wait of [0, 2, 4]) {
+                const route = buildRoute([{ tile: [tx, ty], wait }, { tile: off, wait: 0 }]);
+                if (route) routes.push(route);
+              }
+            }
+          }
+        }
+      }
+    }
+
+
+    // An out-of-reach 1v1 is only worth anything if you can work the target into reach and still only
+    // be seen by it. The most promising ones get follow-up routes, evaluated later in this same loop:
+    // step straight into reach, or stand while it walks in and then shuffle a tile or two so it follows
+    // you round a corner where nothing else can see you.
+    // Follow-ups can themselves be expanded once more: a shuffle that brings the target to 2 tiles can
+    // still need a final step in with a 1-tile weapon.
+    const followUpDepth = new WeakMap<SolveRoute, number>();
+    const outOfReach: Array<{ route: SolveRoute; score: number; depth: number; target: [number, number, number] }> = [];
+    const MAX_STEP_IN = 3;
+    const FOLLOW_UP_CANDIDATES = 3;
+    const FOLLOW_UP_ROUNDS = 2;
+    const FOLLOW_UP_WAITS = [0, 2, 4, 6];
+    // Long enough for a target a few tiles off to walk over before you step in. Only single steps get
+    // these, to keep the number of simulated routes down.
+    const LONG_WAITS = [10, 20, 30];
+    const queueFollowUps = () => {
+      const open = (x: number, y: number) =>
+        x >= 0 && y >= 0 && x < MAP_WIDTH && y < MAP_HEIGHT && !this.isPillar(x, y);
+
+      outOfReach.sort((a, b) => a.score - b.score);
+      const expand = outOfReach.slice(0, FOLLOW_UP_CANDIDATES);
+      outOfReach.length = 0;
+      for (const { route, depth, target: [tx, ty, ts] } of expand) {
+        const push = (clicks: SolveClick[]) => {
+          const followUp = buildRoute(clicks);
+          if (followUp) {
+            followUpDepth.set(followUp, depth + 1);
+            routes.push(followUp);
+          }
+        };
+        const end = route.steps[route.steps.length - 1];
+        const last = route.clicks[route.clicks.length - 1];
+        const arriveThenWait = (wait: number): SolveClick[] =>
+          last
+            ? [...route.clicks.slice(0, -1), { tile: last.tile, wait: last.wait + wait }]
+            : wait > 0
+              ? [{ tile: end, wait }]
+              : [];
+
+        // Step straight into reach, either right away or once the target has had time to walk over.
+        for (const wait of [0, ...LONG_WAITS]) {
+          const arrive = arriveThenWait(wait);
+          for (let sy = ty - ts + 1 - weaponReach; sy <= ty + weaponReach; sy++) {
+            for (let sx = tx - weaponReach; sx <= tx + ts - 1 + weaponReach; sx++) {
+              if (open(sx, sy) && this.hasLOS(tx, ty, sx, sy, ts, weaponReach, true, weaponDiagonals)) {
+                push([...arrive, { tile: [sx, sy], wait: 0 }]);
+              }
+            }
+          }
+        }
+
+        // Or a single step to any neighbouring tile after a long wait.
+        for (const wait of LONG_WAITS) {
+          const arrive = arriveThenWait(wait);
+          for (let dy = -1; dy <= 1; dy++) {
+            for (let dx = -1; dx <= 1; dx++) {
+              if ((dx === 0 && dy === 0) || !open(end[0] + dx, end[1] + dy)) continue;
+              push([...arrive, { tile: [end[0] + dx, end[1] + dy], wait: 0 }]);
+            }
+          }
+        }
+
+        // Or a quick shuffle: wait a little, step a tile, and optionally step again.
+        for (const wait of FOLLOW_UP_WAITS) {
+          const arrive = arriveThenWait(wait);
+          for (let dy1 = -1; dy1 <= 1; dy1++) {
+            for (let dx1 = -1; dx1 <= 1; dx1++) {
+              const first: Coordinates = [end[0] + dx1, end[1] + dy1];
+              if ((dx1 === 0 && dy1 === 0) || !open(first[0], first[1])) continue;
+              push([...arrive, { tile: first, wait: 0 }]);
+              for (let dy2 = -2; dy2 <= 2; dy2++) {
+                for (let dx2 = -2; dx2 <= 2; dx2++) {
+                  const second: Coordinates = [first[0] + dx2, first[1] + dy2];
+                  if ((dx2 === 0 && dy2 === 0) || !open(second[0], second[1])) continue;
+                  push([...arrive, { tile: first, wait: 0 }, { tile: second, wait: 0 }]);
+                }
+              }
+            }
+          }
+        }
+      }
+    };
+
+    const moveSimMob = (mobs: any[], i: number, px: number, py: number, canMove = true, canGainLos = true) =>
+      this.simMobStep(mobs, i, px, py, canMove, canGainLos);
+    const seenBy = (mobs: any[], px: number, py: number) => this.simSeenBy(mobs, px, py);
+
+    let routeIndex = 0;
+    let followUpRound = 0;
+    const evaluateRoute = (route: SolveRoute) => {
+      const tickPath = route.ticks;
+
+      let futureMobs = JSON.parse(JSON.stringify(mobs));
+      let damageTaken = 0;
+      let stackedThreats = 0;
+      // How many mobs can hit you once the route settles - mages included. Your run prayer is only
+      // up while you move; on arrival you switch to protect against the one mob you're fighting, so
+      // anything else that can see the end tile (a mage too) breaks the 1v1.
+      let settledVisible = 0;
+      let settledVisibleIndex = -1;
+
+      let paddedPath: Coordinates[] = [];
+      let lastMeaningfulTick = tickPath.length - 1;
+
+      // Starts at tick 0, not 1: during a real replay, reset() points this.selected at
+      // replay[0] (the starting tile) *before* the first step() call, and that first call's
+      // advanceReplay() re-reads replay[0] (tickCount is still 0) before moveMobs() runs -
+      // so the mobs get one full reaction tick against the player's starting tile before the
+      // player has moved at all. Starting this loop at tick 1 skipped modelling that tick
+      // entirely, which left the simulated mobs permanently a tick behind their real
+      // counterparts (e.g. a mob that would have already turned a pillar corner for real was
+      // still predicted to be approaching it), so the solver could accept a tile as a clean
+      // 1v1 that a mob had actually already reached.
+      const simTicks = Math.max(SIM_TICKS, tickPath.length - 1 + SETTLE_TICKS);
+      for (let tick = 0; tick <= simTicks; tick++) {
+        let pIndex = Math.min(tick, tickPath.length - 1);
+        let px = tickPath[pIndex][0];
+        let py = tickPath[pIndex][1];
+
+        paddedPath.push([px, py] as Coordinates);
+        let npcMovedThisTick = false;
+
+        // Mirrors this.tickCount at the point moveMobs()/processAttacks() would run for this
+        // same player position during a real replay (call tick+1 has this.tickCount === tick
+        // at that point, since tickCount starts at 0 after reset() and only increments at the
+        // end of step(), after moveMobs()/processAttacks() have already run). Keeping this in
+        // sync with step()'s canMove/canGainLos/canAttack gating is what makes the "From Wave
+        // Start" delay behave the same way here as it does when the path is actually played.
+        const simTickCount = tick;
+        const canMove = this.fromWaveStart ? simTickCount > 0 : true;
+        const canGainLos = this.fromWaveStart ? simTickCount > 1 : true;
+        const canAttack = this.fromWaveStart ? simTickCount >= DELAY_FIRST_ATTACK_TICKS : true;
+        let threatsThisTick = 0;
+
+        for (let i = 0; i < futureMobs.length; i++) {
+          let mob = futureMobs[i];
+          let t = mob[2];
+          if (t === 0 || t >= 8) continue;
+          let s = NPC_INFO[t].size;
+          let r = NPC_INFO[t].range;
+
+          if (moveSimMob(futureMobs, i, px, py, canMove, canGainLos)) npcMovedThisTick = true;
+
+          let isPlayerMoving = (tick < tickPath.length);
+          if (canAttack && this.hasLOS(mob[0], mob[1], px, py, s, r, true)) {
+              if (!prayedTypes.has(t)) threatsThisTick++;
+              if (isPlayerMoving) damageTaken += damagePerTick[t] ?? 0;
+          }
+        }
+
+        if (tick < tickPath.length && threatsThisTick > 1) {
+            stackedThreats += threatsThisTick - 1;
+        }
+
+        if (npcMovedThisTick) {
+            lastMeaningfulTick = Math.max(lastMeaningfulTick, tick);
+        }
+
+        if (tick >= simTicks - 10) {
+           let visibleNow = 0;
+           let visibleIndexNow = -1;
+           
+           for (let i = 0; i < futureMobs.length; i++) {
+              let mob = futureMobs[i];
+              let t = mob[2];
+              if (t === 0 || t >= 8) continue;
+              if (this.hasLOS(mob[0], mob[1], px, py, NPC_INFO[t].size, NPC_INFO[t].range, true)) {
+                 visibleNow++;
+                 visibleIndexNow = i;
+              }
+           }
+           
+           // Take the reading from whichever tick we just simulated, not the historical
+           // peak across the window. This used to only ratchet upward, so a mob that had
+           // fleeting LOS while still approaching (before settling into a clean 1v1) would
+           // permanently mark the tile as multi-target even though it settles safely.
+           settledVisible = visibleNow;
+           settledVisibleIndex = visibleIndexNow;
+        }
+      }
+
+      let score = 100000; 
+      let px = tickPath[tickPath.length - 1][0];
+      let py = tickPath[tickPath.length - 1][1];
+
+      let steppedUnder = false;
+      for (let i = 0; i < futureMobs.length; i++) {
+         let mob = futureMobs[i];
+         let t = mob[2];
+         if (t === 0 || t >= 8) continue;
+         
+         let ts = NPC_INFO[t].size;
+         let mx = mob[0];
+         let my = mob[1];
+         
+         if (px >= mx && px <= mx + ts - 1 && py >= my - ts + 1 && py <= my) {
+             steppedUnder = true;
+             break;
+         }
+      }
+
+      let candTargetType = -1;
+      let candAttackable = false;
+      let candDist = -1;
+
+      // A 1v1 means exactly one mob, of any style, can hit you once you've arrived.
+      const targetIndex = !steppedUnder && settledVisible === 1 ? settledVisibleIndex : -1;
+
+      if (steppedUnder) {
+         score = 500000;
+      } else if (targetIndex !== -1) {
+         let tMob = futureMobs[targetIndex];
+         let tId = tMob[2];
+         let ts = NPC_INFO[tId].size;
+
+         // Chebyshev tile-distance from the player to the target's hitbox - 1 means adjacent
+         // (meleeable), independent of the target's own attack range. The player's loadout
+         // (Justiciar/Bulwark) is melee-only, so a "solved" 1v1 against a ranged/mage mob
+         // still has to end with you standing next to it - being the only thing it can see
+         // from 5 tiles away just means you tank unanswerable chip damage forever, since it
+         // won't close the distance once it already has LOS and is in range.
+         //
+         // Out-of-reach 1v1s are never picked directly (see the step-in routes below), so this
+         // penalty only orders them against each other.
+         //
+         // Distance alone can't decide whether you can actually swing, so ask the engine's own
+         // reach rule with this weapon's reach and diagonal capability.
+         let dx = Math.max(0, tMob[0] - px, px - (tMob[0] + ts - 1));
+         let dy = Math.max(0, tMob[1] - ts + 1 - py, py - tMob[1]);
+         let meleeDist = Math.max(dx, dy);
+         let canMeleeBack = this.hasLOS(tMob[0], tMob[1], px, py, ts, weaponReach, true, weaponDiagonals);
+
+         candTargetType = tId;
+         candAttackable = canMeleeBack;
+         candDist = meleeDist;
+
+         score = 0;
+         // Penalty scales with how many tiles you'd still have to close. A tile that's within
+         // reach but blocked (e.g. a pillar corner clipping the line) costs one unit, same as
+         // needing a single step, since either way it's one reposition away from a kill spot.
+         if (!canMeleeBack) score += Math.max(1, meleeDist - weaponReach + 1) * 10000;
+         if (tId === MINOTAUR) score -= 5000;
+         else if (minotaurAlive) score += 5000;
+         else score -= 2000;
+
+      } else if (settledVisible === 0) {
+         score = 30000;
+      } else {
+         score = 80000 + (settledVisible * 10000);
+      }
+
+      // 50 points per expected HP lost on the way, so a second click (1000) is worth about 20 HP.
+      score += damageTaken * 50;
+      score += stackedThreats * STACKED_THREAT_PENALTY;
+      score += (tickPath.length * 10);
+
+      score += route.clicks.length * CLICK_PENALTY;
+
+      const endsOnOrbit = this.solarflare && this.isOnSolarflareOrbit(px, py);
+      if (endsOnOrbit) score += SOLARFLARE_END_PENALTY;
+
+      // --- SMART MINOTAUR HEAL PENALTY ---
+      let minotaurHealPenalty = 0;
+      if (minotaurAlive && targetIndex !== -1) {
+         let targetMob = futureMobs[targetIndex];
+         let tId = targetMob[2];
+         
+         if (tId !== 0 && tId < 8 && tId !== MINOTAUR) {
+             let currentMinotaurs = futureMobs.filter((m: any) => m[2] === MINOTAUR);
+             for (let mino of currentMinotaurs) {
+                 let s = NPC_INFO[tId].size;
+                 if (s % 2 === 1) { 
+                     let centerOffset = (s - 1) / 2;
+                     if (this.hasLOS(mino[0] + 1, mino[1] - 1, targetMob[0] + centerOffset, targetMob[1] - centerOffset, 1, MINOTAUR_HEAL_RANGE, false)) {
+                         minotaurHealPenalty += 40000; 
+                     }
+                 }
+             }
+         }
+      }
+      score += minotaurHealPenalty;
+
+      const targetMob = targetIndex !== -1 ? futureMobs[targetIndex] : null;
+      return {
+        route,
+        score,
+        targetIndex,
+        attackable: candAttackable,
+        dist: candDist,
+        target: targetMob ? ([targetMob[0], targetMob[1], NPC_INFO[targetMob[2]].size] as [number, number, number]) : null,
+        replayPath: paddedPath.slice(0, lastMeaningfulTick + 1),
+        targetType: candTargetType,
+        healed: minotaurHealPenalty > 0,
+        onOrbit: endsOnOrbit,
+        damage: damageTaken,
+        end: [px, py] as Coordinates,
+        endMobs: futureMobs,
+        exposedAfterKill: false,
+        noJavelinDodge: false,
+      };
+    };
+
+    type Evaluation = ReturnType<typeof evaluateRoute>;
+    const candidates: Evaluation[] = [];
+    const isClean = (e: Evaluation) => e.targetIndex !== -1 && e.attackable;
+
+    // What's left once the 1v1 is dead. A kill tile in the middle of the rest of the stack means
+    // eating hits to get back behind a pillar. It's fine if nothing else can see you, or if one mob
+    // can and it's your next 1v1: already in reach, or still alone once you click it and walk over.
+    // Still far better than hiding (30000), so a solve is never lost over this.
+    const AFTER_KILL_TICKS = 8;
+    const AFTER_KILL_PENALTY = 8000;
+    const settleAfterKill = (mobs: any[], px: number, py: number) => {
+      for (let tick = 0; tick < AFTER_KILL_TICKS; tick++) {
+        for (let i = 0; i < mobs.length; i++) moveSimMob(mobs, i, px, py);
+      }
+      return seenBy(mobs, px, py);
+    };
+    const afterKillCache = new Map<string, boolean>();
+    const isExposedAfterKill = (e: Evaluation) => {
+      const [px, py] = e.end;
+      const rest: any[] = e.endMobs.filter((_m: any, i: number) => i !== e.targetIndex).map((m: any) => [...m]);
+      const key = `${px},${py}:${rest.map((m) => `${m[0]},${m[1]},${m[2]}`).join(";")}`;
+      const cached = afterKillCache.get(key);
+      if (cached !== undefined) return cached;
+
+      const canHit = (mob: any, x: number, y: number) =>
+        this.hasLOS(mob[0], mob[1], x, y, NPC_INFO[mob[2]].size, weaponReach, true, weaponDiagonals);
+      const exposed = (() => {
+        const seen = settleAfterKill(rest, px, py);
+        if (seen.length === 0) return false;
+        if (seen.length > 1) return true;
+        const next = seen[0];
+        if (canHit(rest[next], px, py)) return false;
+        // Clicking it walks the game's route to the nearest tile you can hit it from, which can drag
+        // you into view of another mob. A cleaner tile a step to the side doesn't count: nobody
+        // finds that mid-fight.
+        const walk = pathToFirst([px, py], MAP_WIDTH, MAP_HEIGHT, (x, y) => this.isPillar(x, y), (x, y) =>
+          canHit(rest[next], x, y),
+        );
+        if (!walk) return true;
+        let at: Coordinates = [px, py];
+        for (const tile of runTicks(walk)) {
+          at = tile;
+          for (let i = 0; i < rest.length; i++) moveSimMob(rest, i, at[0], at[1]);
+        }
+        const seenThere = settleAfterKill(rest, at[0], at[1]);
+        return !(seenThere.length === 1 && seenThere[0] === next && canHit(rest[next], at[0], at[1]));
+      })();
+      afterKillCache.set(key, exposed);
+      return exposed;
+    };
+
+    // The Javelin Colossus throws javelins at your tile, so you have to step off and back. A Javelin
+    // 1v1 needs a neighbouring tile you can dodge onto without anything else getting a look at you,
+    // otherwise dodging turns it into a 2v1 - an outer-wall safespot is the usual culprit.
+    const JAVELIN_DODGE_PENALTY = 8000;
+    const DODGE_TICKS = 2;
+    const canDodgeJavelin = (e: Evaluation) => {
+      const [px, py] = e.end;
+      const blocked = (x: number, y: number) => x < 0 || y < 0 || x >= MAP_WIDTH || y >= MAP_HEIGHT || this.isPillar(x, y);
+      for (let dy = -1; dy <= 1; dy++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          const x = px + dx;
+          const y = py + dy;
+          if ((dx === 0 && dy === 0) || blocked(x, y)) continue;
+          // no cutting corners, same as the player's own pathing
+          if (dx !== 0 && dy !== 0 && (blocked(px + dx, py) || blocked(px, py + dy))) continue;
+          const mobs: any[] = JSON.parse(JSON.stringify(e.endMobs));
+          if (mobs.some((m) => m[2] !== 0 && m[2] < 8 && this.doesCollide(x, y, 1, m[0], m[1], NPC_INFO[m[2]].size))) continue;
+          let safe = true;
+          const hold = (hx: number, hy: number) => {
+            for (let i = 0; i < mobs.length; i++) this.simMobStep(mobs, i, hx, hy);
+            if (this.simSeenBy(mobs, hx, hy).some((i) => i !== e.targetIndex)) safe = false;
+          };
+          for (let t = 0; t < DODGE_TICKS && safe; t++) hold(x, y);
+          for (let t = 0; t < DODGE_TICKS && safe; t++) hold(px, py);
+          if (safe) return true;
+        }
+      }
+      return false;
+    };
+
+    // Outer-wall safespots are hard to judge in game and leave nowhere to go, so they're a last
+    // resort: any pillar-side 1v1 that's close to as good wins.
+    const OUTER_WALL_PENALTY = 3000;
+    const touchesOuterWall = ([px, py]: Coordinates) => {
+      for (let dy = -1; dy <= 1; dy++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          const x = px + dx;
+          const y = py + dy;
+          if (x < 0 || y < 0 || x >= MAP_WIDTH || y >= MAP_HEIGHT) return true;
+          if (PILLAR_COORDS.some(([cx, cy]) => this.doesCollide(x, y, 1, cx, cy, 3))) continue;
+          if (this.isPillar(x, y)) return true;
+        }
+      }
+      return false;
+    };
+
+    for (;;) {
+      if (routeIndex >= routes.length) {
+        if (quick || followUpRound >= FOLLOW_UP_ROUNDS || outOfReach.length === 0) break;
+        followUpRound++;
+        queueFollowUps();
+        continue;
+      }
+      const result = evaluateRoute(routes[routeIndex++]);
+
+      // Never pick a fight you can't hit. Out-of-reach 1v1s only seed the follow-up routes above, which
+      // are simulated from scratch, so one that drags another mob into view is caught like any other.
+      if (result.targetIndex !== -1 && !result.attackable) {
+        const depth = followUpDepth.get(result.route) ?? 0;
+        if (depth < FOLLOW_UP_ROUNDS && result.dist - weaponReach <= MAX_STEP_IN && result.target) {
+          outOfReach.push({ route: result.route, score: result.score, depth, target: result.target });
+        }
+      } else {
+        if (isClean(result) && isExposedAfterKill(result)) {
+          result.score += AFTER_KILL_PENALTY;
+          result.exposedAfterKill = true;
+        }
+        if (isClean(result) && result.targetType === NPC_TYPES.JAVELIN_COLOSSUS && !canDodgeJavelin(result)) {
+          result.score += JAVELIN_DODGE_PENALTY;
+          result.noJavelinDodge = true;
+        }
+        if (isClean(result) && touchesOuterWall(result.end)) {
+          result.score += OUTER_WALL_PENALTY;
+        }
+        candidates.push(result);
+      }
+    }
+
+    // A plan that only works when every click lands on the exact tick falls apart in game: clicking
+    // back one tick early let a Shaman step behind a pillar instead of walking round it. Clean 1v1s are
+    // replayed with each click a tick early and a tick late (and the start a tick late); the best one
+    // that survives all of them wins. A fragile one is only used, with a warning, if nothing sturdier
+    // beats hiding.
+    const ROBUST_CHECKS = 20;
+    const timingHolds = (route: SolveRoute) => {
+      const { clicks } = route;
+      const variants: Array<SolveRoute | null> = [];
+      if (clicks.length > 0) variants.push(buildRoute(clicks, 1));
+      for (let i = 0; i < clicks.length - 1; i++) {
+        variants.push(buildRoute(clicks.map((c, j) => (j === i ? { ...c, wait: c.wait + 1 } : c))));
+        variants.push(
+          buildRoute(clicks.map((c, j) => (j === i ? (c.wait > 0 ? { ...c, wait: c.wait - 1 } : { ...c, early: true }) : c))),
+        );
+      }
+      return variants.every((v) => !v || isClean(evaluateRoute(v)));
+    };
+
+    candidates.sort((a, b) => a.score - b.score);
+    let chosen: Evaluation | null = null;
+    let fragileFallback: Evaluation | null = null;
+    let robustChecks = 0;
+    for (const candidate of candidates) {
+      if (candidate.score >= 75000) break;
+      if (!isClean(candidate)) {
+        chosen = fragileFallback ?? candidate;
+        break;
+      }
+      if (quick) {
+        chosen = candidate;
+        break;
+      }
+      if (robustChecks < ROBUST_CHECKS) {
+        robustChecks++;
+        if (timingHolds(candidate.route)) {
+          chosen = candidate;
+          break;
+        }
+      }
+      fragileFallback ??= candidate;
+    }
+    chosen ??= fragileFallback;
+    if (!chosen || chosen.score >= 75000) return null;
+    return { ...chosen, fragile: chosen === fragileFallback };
+  }
+
+  // One NPC step, in two phases. First the direction is picked from terrain alone: diagonal, then
+  // east/west, then north/south. Then other NPCs are checked. A diagonal blocked by an NPC slides to
+  // east/west, then north/south (the "wiggle"). A straight step that terrain forced - because the
+  // diagonal hit a pillar - just waits if an NPC is on it, and takes the tile once it's free. In game
+  // a Shaman did exactly that behind the NW pillar instead of walking round a Javelin.
+  private npcStep(x: number, y: number, size: number, index: number, dx: number, dy: number, mobs: any[]): Coordinates | null {
+    const terrain = (tx: number, ty: number) => this.legalPositionForSim(tx, ty, size, index, []);
+    const free = (tx: number, ty: number) => this.legalPositionForSim(tx, ty, size, index, mobs);
+    const moves = (tx: number, ty: number) => tx !== x || ty !== y;
+
+    const diagonal = dx !== x && dy !== y && terrain(dx, dy) && (size > 1 || (terrain(dx, y) && terrain(x, dy)));
+    if (diagonal) {
+      if (free(dx, dy) && (size > 1 || (free(dx, y) && free(x, dy)))) return [dx, dy];
+      if (free(dx, y)) return [dx, y];
+      if (free(x, dy)) return [x, dy];
+      return null;
+    }
+
+    let straight: Coordinates | null = null;
+    if (moves(dx, y) && terrain(dx, y)) straight = [dx, y];
+    else if (moves(x, dy) && terrain(x, dy)) straight = [x, dy];
+    return straight && free(straight[0], straight[1]) ? straight : null;
+  }
+
+  // Helper for the simulator to check NPC vs NPC collisions (Traffic Jams)
+  private legalPositionForSim(x: number, y: number, size: number, index: number, mobs: any[]) {
+    if (y - (size - 1) < 0 || x + (size - 1) > MAP_WIDTH) return false;
+    
+    // Pillar collision check
+    for (let i = 0; i < PILLAR_COORDS.length; i++) {
+      if (this.doesCollide(x, y, size, PILLAR_COORDS[i][0], PILLAR_COORDS[i][1], 3)) return false;
+    }
+
+    // Wall collision check
+    for (let yy = y - size + 1; yy <= y; yy++) {
+      if (yy >= 0 && yy < blockedTileRanges.length) {
+        let ranges = blockedTileRanges[yy];
+        for (let j = 0; j < ranges.length; ++j) {
+          if (x + size > ranges[j][0] && x < ranges[j][1]) return false;
+        }
+      }
+    }
+    
+    // NPC vs NPC collision check
+    for (let i = 0; i < mobs.length; i++) {
+      if (i !== index && mobs[i][2] < 8) {
+        if (this.doesCollide(x, y, size, mobs[i][0], mobs[i][1], NPC_INFO[mobs[i][2]].size)) {
+          return false;
+        }
+      }
+    }
+    return true;
+  }
+
+  // Where each click dot and wait label goes, in canvas pixels. Dots on the same tile sit side by
+  // side. A wait label goes above or below its tile (alternating between markers), and moves to the
+  // other side, or beside its dots, rather than cover another dot or label.
+  public layoutClickMarkers(measure: (text: string) => number) {
+    type Box = { x0: number; y0: number; x1: number; y1: number };
+    const boxAt = (x: number, y: number, w: number, h: number): Box => ({ x0: x - w / 2, y0: y - h / 2, x1: x + w / 2, y1: y + h / 2 });
+    const overlaps = (a: Box, b: Box) => a.x0 < b.x1 && b.x0 < a.x1 && a.y0 < b.y1 && b.y0 < a.y1;
+
+    const markers = new Map<string, { tile: Coordinates; dots: Array<{ label: string; start: boolean }>; waits: number[] }>();
+    this.suggestedClicks.forEach(({ tile, wait }, i) => {
+      const key = `${tile[0]},${tile[1]}`;
+      let marker = markers.get(key);
+      if (!marker) {
+        marker = { tile, dots: [], waits: [] };
+        markers.set(key, marker);
+      }
+      const isStart = this.suggestedStartHidden && i === 0;
+      marker.dots.push({ label: isStart ? "S" : String(this.suggestedStartHidden ? i : i + 1), start: isStart });
+      // Nothing sees you on S and the mobs have stopped moving, so you can stand there as long as you
+      // like: its wait is only the simulation letting them settle.
+      if (wait > 0 && !isStart) marker.waits.push(wait);
+    });
+
+    const dots: Array<{ x: number; y: number; label: string; start: boolean }> = [];
+    for (const { tile, dots: tileDots } of markers.values()) {
+      const cx = (tile[0] + 0.5) * TILE_SIZE;
+      const cy = (tile[1] + 0.5) * TILE_SIZE;
+      tileDots.forEach((dot, j) => dots.push({ x: cx + (j - (tileDots.length - 1) / 2) * 14, y: cy, ...dot }));
+    }
+
+    const taken: Box[] = dots.map((dot) => boxAt(dot.x, dot.y, 16, 16));
+    const labels: Array<{ x: number; y: number; text: string }> = [];
+    [...markers.values()].forEach(({ tile, dots: tileDots, waits }, order) => {
+      if (waits.length === 0) return;
+      const text = `wait ${waits.join(", then ")}`;
+      const w = measure(text) + 4;
+      const h = 12;
+      const cx = (tile[0] + 0.5) * TILE_SIZE;
+      const cy = (tile[1] + 0.5) * TILE_SIZE;
+      const halfDots = ((tileDots.length - 1) * 14) / 2 + 8;
+      const above: Coordinates = [cx, cy - 14];
+      const below: Coordinates = [cx, cy + 16];
+      const spots: Coordinates[] = [
+        ...(order % 2 === 0 ? [above, below] : [below, above]),
+        [cx + halfDots + w / 2 + 2, cy],
+        [cx - halfDots - w / 2 - 2, cy],
+      ];
+      const spot = spots.find(([x, y]) => !taken.some((b) => overlaps(boxAt(x, y, w, h), b))) ?? spots[0];
+      taken.push(boxAt(spot[0], spot[1], w, h));
+      labels.push({ x: spot[0], y: spot[1], text });
+    });
+    return { dots, labels };
+  }
+
+  public drawSuggestedPath() {
+    if (!this.suggestedPath || !this.ctx) return;
+    const ctx = this.ctx;
+    const steps = this.suggestedPath;
+    const centre = (tile: Coordinates) => [(tile[0] + 0.5) * TILE_SIZE, (tile[1] + 0.5) * TILE_SIZE];
+
+    // The tile-by-tile walk the game takes between clicks. A one-tile route means "hold this
+    // tile", which still gets the end-tile highlight below.
+    if (steps.length >= 2) {
+      ctx.beginPath();
+      ctx.strokeStyle = "#00FF00";
+      ctx.lineWidth = 4;
+      ctx.setLineDash([5, 5]);
+      const [startX, startY] = centre(steps[0]);
+      ctx.moveTo(startX, startY);
+      for (let i = 1; i < steps.length; i++) {
+        const [x, y] = centre(steps[i]);
+        ctx.lineTo(x, y);
+      }
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+
+    // Final tile, coloured by whether the target is actually in reach from it: green means you
+    // can start attacking on arrival, amber means you're isolated but still have to step in.
+    const endTile = steps[steps.length - 1];
+    ctx.fillStyle = this.solveEndAttackable ? "#00FF00" : "#FFD700";
+    ctx.globalAlpha = 0.5;
+    ctx.fillRect(endTile[0] * TILE_SIZE, endTile[1] * TILE_SIZE, TILE_SIZE, TILE_SIZE);
+    ctx.globalAlpha = 1.0;
+
+    // A blue "S" dot is a hidden tile to start from, a red numbered dot is a click (the green tile
+    // above marks where you end up). Timed clicks are numbered from 1 after S. Dots on the same tile
+    // sit side by side, so a route that comes back to where it started stays readable.
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.font = "bold 11px sans-serif";
+    const { dots, labels } = this.layoutClickMarkers((text) => ctx.measureText(text).width);
+    for (const { x, y, label, start } of dots) {
+      ctx.beginPath();
+      ctx.arc(x, y, 8, 0, 2 * Math.PI);
+      ctx.fillStyle = start ? "#1E6FFF" : "#FF0000";
+      ctx.fill();
+      ctx.lineWidth = 1;
+      ctx.strokeStyle = "#FFFFFF";
+      ctx.stroke();
+      ctx.fillStyle = "#FFFFFF";
+      ctx.fillText(label, x, y + 1);
+    }
+    // labels last, so no dot is drawn over one
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = "#000000";
+    ctx.fillStyle = "#FFD700";
+    for (const { x, y, text } of labels) {
+      ctx.strokeText(text, x, y);
+      ctx.fillText(text, x, y);
+    }
   }
 
   // exposed for testing
