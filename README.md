@@ -17,11 +17,6 @@ It goes for, in order:
 3. Fewest clicks
 4. Least damage
 
-It also checks that nothing else can see your end tile (mages included), that you aren't left in the
-open once your 1v1 dies, that the plan survives a click landing a tick late, Solarflare orbs, and
-Javelin specials that force you off your tile. Damage is estimated from your own defence bonuses,
-Justiciar and Piety.
-
 The whole plan can be stepped through tick by tick to see how the NPCs react.
 
 ## Credit
