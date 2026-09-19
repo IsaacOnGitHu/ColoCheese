@@ -7,6 +7,8 @@ import {
   DEFAULT_PLAYER_DEFENCE,
   expectedDamagePerTick,
   isPrayedAgainst,
+  NO_INVOCATIONS,
+  type Invocations,
   type PlayerDefence,
   type PrayerStyle,
 } from "./damageModel";
@@ -104,6 +106,8 @@ export class LineOfSight {
   // Your defences for the damage estimate, and the prayer you keep up while running a route.
   playerDefence: PlayerDefence = { ...DEFAULT_PLAYER_DEFENCE };
   runPrayer: PrayerStyle = "magic";
+  // Relentless and Mantimayhem tiers, which change how hard enemies hit.
+  invocations: Invocations = { ...NO_INVOCATIONS };
 
   replay: Coordinates[] | null = null;
   replayTick: number | null = null;
@@ -252,11 +256,14 @@ export class LineOfSight {
     solarflare: boolean;
     runPrayer: PrayerStyle;
     defence: PlayerDefence;
+    // Optional so older callers still work: anything missing counts as off.
+    invocations?: Partial<Invocations>;
   }) => {
     this.weaponMode = settings.weaponMode;
     this.solarflare = settings.solarflare;
     this.runPrayer = settings.runPrayer;
     this.playerDefence = { ...settings.defence };
+    this.invocations = { ...NO_INVOCATIONS, ...settings.invocations };
     this.clearSolveResult();
     this.drawWave();
     this.onUpdateSubscribers();
@@ -1693,7 +1700,7 @@ export class LineOfSight {
     const damagePerTick: Record<number, number> = {};
     const prayedTypes = new Set<number>();
     for (const type of Object.values(NPC_TYPES)) {
-      damagePerTick[type] = expectedDamagePerTick(type, this.playerDefence, this.runPrayer);
+      damagePerTick[type] = expectedDamagePerTick(type, this.playerDefence, this.runPrayer, this.invocations);
       if (isPrayedAgainst(type, this.runPrayer)) prayedTypes.add(type);
     }
     const SIM_TICKS = 45;

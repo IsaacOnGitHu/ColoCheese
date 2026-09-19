@@ -311,6 +311,10 @@ canvas {
   font-size: 12px;
 }
 
+.reach-row .gap-left {
+  margin-left: 10px;
+}
+
 .reach-row select {
   background: #0d1117;
   color: #c9d1d9;

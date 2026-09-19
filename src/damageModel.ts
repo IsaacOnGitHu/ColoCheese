@@ -33,6 +33,21 @@ export const PRAYER_LABELS: Record<PrayerStyle, string> = {
   melee: "Melee",
 };
 
+// Invocation tiers, 0 = off. Higher tiers include the lower ones, as in game.
+export type InvocationTier = 0 | 1 | 2 | 3;
+export type Invocations = { relentless: InvocationTier; mantimayhem: InvocationTier };
+export const NO_INVOCATIONS: Invocations = { relentless: 0, mantimayhem: 0 };
+export const TIER_LABELS = ["Off", "I", "II", "III"] as const;
+
+// Relentless: enemy attacks bypass part of your Defence level and have higher max hits. Tier III
+// skips the accuracy roll altogether, so every attack lands.
+const RELENTLESS = [
+  { defenceBypass: 0, maxHitBonus: 0, alwaysHits: false },
+  { defenceBypass: 0.33, maxHitBonus: 1, alwaysHits: false },
+  { defenceBypass: 0.66, maxHitBonus: 3, alwaysHits: false },
+  { defenceBypass: 1, maxHitBonus: 6, alwaysHits: true },
+];
+
 type Hit = { style: HitStyle; level: number; bonus: number; maxHit: number; count?: number };
 type NpcAttack = { speed: number; hits: Hit[] };
 
@@ -82,12 +97,20 @@ function defenceBonus(style: HitStyle, player: PlayerDefence) {
 }
 
 /** Average damage per tick this NPC deals while it can hit you, with `prayer` up. */
-export function expectedDamagePerTick(type: number, player: PlayerDefence, prayer: PrayerStyle) {
+export function expectedDamagePerTick(
+  type: number,
+  player: PlayerDefence,
+  prayer: PrayerStyle,
+  invocations: Invocations = NO_INVOCATIONS,
+) {
   const attack = NPC_ATTACKS[type];
   if (!attack) return 0;
+  const relentless = RELENTLESS[invocations.relentless] ?? RELENTLESS[0];
 
   // Piety boosts Defence by 25%, which also feeds the 30% Defence share of magic defence.
-  const defenceLevel = player.piety ? Math.floor(player.defenceLevel * 1.25) : player.defenceLevel;
+  // Relentless then bypasses part of that Defence level.
+  const boosted = player.piety ? Math.floor(player.defenceLevel * 1.25) : player.defenceLevel;
+  const defenceLevel = Math.floor(boosted * (1 - relentless.defenceBypass));
 
   let perAttack = 0;
   for (const hit of attack.hits) {
@@ -101,11 +124,14 @@ export function expectedDamagePerTick(type: number, player: PlayerDefence, praye
     const attackRoll = (hit.level + 9) * (hit.bonus + 64);
     const defenceRoll = effectiveDefence * Math.max(0, bonus + 64);
 
-    let averageHit = hit.maxHit / 2;
+    let averageHit = (hit.maxHit + relentless.maxHitBonus) / 2;
     if (player.justiciar) {
       averageHit = Math.max(0, averageHit - Math.max(1, (averageHit * Math.max(0, bonus)) / 3000));
     }
-    perAttack += (hit.count ?? 1) * hitChance(attackRoll, defenceRoll) * averageHit;
+    const chance = relentless.alwaysHits ? 1 : hitChance(attackRoll, defenceRoll);
+    perAttack += (hit.count ?? 1) * chance * averageHit;
   }
+  // Mantimayhem gives every orb a second projectile.
+  if (type === NPC_TYPES.MANTICORE && invocations.mantimayhem > 0) perAttack *= 2;
   return perAttack / attack.speed;
 }

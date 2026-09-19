@@ -12,13 +12,23 @@ import { LineOfSight } from "./lineOfSight";
 
 import "./App.css";
 import { DEFAULT_WEAPON_MODE, NpcType, WEAPON_MODES, WeaponMode } from "./constants";
-import { DEFAULT_PLAYER_DEFENCE, PRAYER_LABELS, PlayerDefence, PrayerStyle } from "./damageModel";
+import {
+  DEFAULT_PLAYER_DEFENCE,
+  InvocationTier,
+  Invocations,
+  NO_INVOCATIONS,
+  PRAYER_LABELS,
+  PlayerDefence,
+  PrayerStyle,
+  TIER_LABELS,
+} from "./damageModel";
 
 type Settings = {
   weaponMode: WeaponMode;
   solarflare: boolean;
   runPrayer: PrayerStyle;
   defence: PlayerDefence;
+  invocations: Invocations;
 };
 
 const SETTINGS_KEY = "colo-cheese-settings";
@@ -28,7 +38,10 @@ const DEFAULT_SETTINGS: Settings = {
   solarflare: false,
   runPrayer: "magic",
   defence: DEFAULT_PLAYER_DEFENCE,
+  invocations: NO_INVOCATIONS,
 };
+
+const toTier = (value: unknown): InvocationTier => (value === 1 || value === 2 || value === 3 ? value : 0);
 
 function loadSettings(): Settings {
   try {
@@ -39,6 +52,10 @@ function loadSettings(): Settings {
       solarflare: saved.solarflare === true,
       runPrayer: saved.runPrayer in PRAYER_LABELS ? saved.runPrayer : DEFAULT_SETTINGS.runPrayer,
       defence: { ...DEFAULT_PLAYER_DEFENCE, ...saved.defence },
+      invocations: {
+        relentless: toTier(saved.invocations?.relentless),
+        mantimayhem: toTier(saved.invocations?.mantimayhem),
+      },
     };
   } catch {
     return DEFAULT_SETTINGS;
@@ -473,6 +490,43 @@ function App() {
               />
               Piety
             </label>
+          </div>
+
+          <div className="reach-row">
+            <label htmlFor="relentless-select">Relentless</label>
+            <select
+              id="relentless-select"
+              value={settings.invocations.relentless}
+              onChange={(e) =>
+                updateSettings({
+                  invocations: { ...settings.invocations, relentless: toTier(Number(e.target.value)) },
+                })
+              }
+            >
+              {TIER_LABELS.map((label, tier) => (
+                <option key={tier} value={tier}>
+                  {label}
+                </option>
+              ))}
+            </select>
+            <label htmlFor="mantimayhem-select" className="gap-left">
+              Mantimayhem
+            </label>
+            <select
+              id="mantimayhem-select"
+              value={settings.invocations.mantimayhem}
+              onChange={(e) =>
+                updateSettings({
+                  invocations: { ...settings.invocations, mantimayhem: toTier(Number(e.target.value)) },
+                })
+              }
+            >
+              {TIER_LABELS.map((label, tier) => (
+                <option key={tier} value={tier}>
+                  {label}
+                </option>
+              ))}
+            </select>
           </div>
 
           <div className="stat-heading">Your defence</div>
