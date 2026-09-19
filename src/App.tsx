@@ -76,7 +76,20 @@ function App() {
   const [isDragging, setDragging] = useState(false);
   const [lineOfSight, setLineOfSight] = useState<LineOfSight | null>(null);
   const [showGuide, setShowGuide] = useState(false);
-  const [solving, setSolving] = useState(false);
+  const [solving, setSolving] = useState<null | "tank" | "meta">(null);
+  const runSolve = (kind: "tank" | "meta") => {
+    if (!lineOfSight || solving) return;
+    setSolving(kind);
+    // Give the button a moment to show it's working before the solver holds up the page.
+    setTimeout(() => {
+      try {
+        if (kind === "tank") lineOfSight.solveAndDrawTankPath();
+        else lineOfSight.solveMeta();
+      } finally {
+        setSolving(null);
+      }
+    }, 30);
+  };
 
   // Easter egg: click the header cheese five times in quick succession.
   const [cheeseClicks, setCheeseClicks] = useState({ count: 0, at: 0 });
@@ -271,24 +284,22 @@ function App() {
 
         <button
           className="solve-tank-btn"
-          onClick={() => {
-            if (!lineOfSight || solving) return;
-            setSolving(true);
-            // Give the button a moment to show it's working before the solver holds up the page.
-            setTimeout(() => {
-              try {
-                lineOfSight.solveAndDrawTankPath();
-              } finally {
-                setSolving(false);
-              }
-            }, 30);
-          }}
-          disabled={solving}
+          onClick={() => runSolve("tank")}
+          disabled={!!solving}
           aria-label="Find a safe 1v1"
           data-microtip-position="bottom"
           role="tooltip"
         >
-          {solving ? "⏳ Solving..." : "🛡️ Solve Tank Path"}
+          {solving === "tank" ? "⏳ Solving..." : "🛡️ Solve Tank Path"}
+        </button>
+
+        <button
+          className="meta-solve-btn"
+          onClick={() => runSolve("meta")}
+          disabled={!!solving}
+          title="For players who flick: off-tick the stack instead of isolating one mob"
+        >
+          {solving === "meta" ? "⏳ Solving..." : "⚡ Meta Solve"}
         </button>
 
         {solveSummary && (
@@ -561,6 +572,7 @@ function App() {
               <li>Hit Solve.</li>
               <li>If there's a blue S, walk there first. Put your run prayer on and click the red dots in order. Stand still if it says wait, then click the end tile.</li>
               <li>After a kill, drag the dead mob off, move everyone to where they are now, and solve again.</li>
+              <li>Can flick? Meta Solve off-ticks the stack instead, and tells you which prayer to switch to and when.</li>
             </ol>
           )}
         </div>

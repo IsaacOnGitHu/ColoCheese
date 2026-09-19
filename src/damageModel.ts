@@ -105,6 +105,32 @@ export function expectedDamagePerTick(
 ) {
   const attack = NPC_ATTACKS[type];
   if (!attack) return 0;
+  return attackDamage(type, player, (style) => covers(prayer, style), invocations) / attack.speed;
+}
+
+/**
+ * Average damage of the part of one attack that `style`'s prayer would block - what that attack
+ * costs you if you're praying something else when it lands. For a Manticore that's its one orb of
+ * that style.
+ */
+export function expectedAttackDamage(
+  type: number,
+  style: PrayerStyle,
+  player: PlayerDefence,
+  invocations: Invocations = NO_INVOCATIONS,
+) {
+  if (!NPC_ATTACKS[type]) return 0;
+  return attackDamage(type, player, (hitStyle) => !covers(style, hitStyle), invocations);
+}
+
+// Average damage of one attack, skipping the hits `blocked` says are prayed against.
+function attackDamage(
+  type: number,
+  player: PlayerDefence,
+  blocked: (style: HitStyle) => boolean,
+  invocations: Invocations,
+) {
+  const attack = NPC_ATTACKS[type];
   const relentless = RELENTLESS[invocations.relentless] ?? RELENTLESS[0];
 
   // Piety boosts Defence by 25%, which also feeds the 30% Defence share of magic defence.
@@ -114,7 +140,7 @@ export function expectedDamagePerTick(
 
   let perAttack = 0;
   for (const hit of attack.hits) {
-    if (covers(prayer, hit.style)) continue;
+    if (blocked(hit.style)) continue;
 
     const bonus = defenceBonus(hit.style, player);
     const effectiveDefence =
@@ -133,5 +159,5 @@ export function expectedDamagePerTick(
   }
   // Mantimayhem gives every orb a second projectile.
   if (type === NPC_TYPES.MANTICORE && invocations.mantimayhem > 0) perAttack *= 2;
-  return perAttack / attack.speed;
+  return perAttack;
 }

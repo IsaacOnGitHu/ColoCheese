@@ -5,6 +5,7 @@ import { canBounce, getCenterTile } from "./venator";
 import { buildPathTree, pathTo, pathToFirst, runTicks, type PathTree } from "./playerPathing";
 import {
   DEFAULT_PLAYER_DEFENCE,
+  expectedAttackDamage,
   expectedDamagePerTick,
   isPrayedAgainst,
   NO_INVOCATIONS,
@@ -12,6 +13,7 @@ import {
   type PlayerDefence,
   type PrayerStyle,
 } from "./damageModel";
+import { describeRhythm, flickPlan, readTimeline, tickPrayer } from "./metaSolver";
 import { computeReplayBounds, convertMobSpecToMob, copyQ, decodeURL, encodeCoordinate, extendBounds, getMobSpec, getReplayURL, getSpawnUrl, record } from "./utils";
 
 /** One click in a solved route: the tile to click, and how many ticks to stand on it afterwards. */
@@ -1594,6 +1596,243 @@ export class LineOfSight {
       this.updateUi();
       this.drawWave();
     }
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // Meta Solve: rather than isolating one mob, leave several attacking you on different ticks and
+  // flick protection prayers so every attack is prayed. Each candidate route is played through a
+  // fresh copy of the real engine, so the attack timing it judges - cooldowns, Manticore charging,
+  // one Manticore volley at a time - is exactly what the replay then shows.
+  // ---------------------------------------------------------------------------------------------
+
+  // Plays `ticks`, then holds the last tile for `hold` more, through a fresh copy of the engine.
+  private runEngine(ticks: Coordinates[], hold: number) {
+    const sim = new LineOfSight();
+    sim.mobs = JSON.parse(JSON.stringify(this.mobs));
+    sim.mantimayhem3 = this.mantimayhem3;
+    sim.manticoreTicksRemaining = { ...this.manticoreTicksRemaining };
+    const path = [...ticks];
+    for (let i = 0; i < hold; i++) path.push(ticks[ticks.length - 1]);
+    sim.replay = path;
+    sim.replayTick = 0;
+    sim.selected = [...path[0]];
+    for (let i = 0; i < path.length; i++) sim.step();
+    return sim;
+  }
+
+  public solveMeta() {
+    const start: Coordinates = [this.selected[0], this.selected[1]];
+    const { reach, diagonals } = WEAPON_MODES[this.weaponMode];
+    // Ticks simulated after the route ends, and how many of those to let settle before judging.
+    const HOLD = 40;
+    const SETTLE = 5;
+    // A click still matters; a prayer switch is cheap for someone who flicks, but switching on
+    // consecutive ticks between different mobs is what goes wrong in practice.
+    const CLICK_PENALTY = 1000;
+    const SWITCH_PENALTY = 300;
+    const TIGHT_SWITCH_PENALTY = 1500;
+    const SOLARFLARE_END_PENALTY = 20000;
+
+    const types = this.mobs.map((m) => m[2]);
+    const knownPattern = this.mobs.map((m) => m[2] !== MANTICORE || (!!m[6] && m[6] !== "u"));
+    const minotaurAlive = types.includes(MINOTAUR);
+
+    const treeCache = new Map<string, PathTree>();
+    const treeFrom = (from: Coordinates) => {
+      const key = `${from[0]},${from[1]}`;
+      let tree = treeCache.get(key);
+      if (!tree) {
+        tree = buildPathTree(from, MAP_WIDTH, MAP_HEIGHT, (x, y) => this.isPillar(x, y));
+        treeCache.set(key, tree);
+      }
+      return tree;
+    };
+    const buildRoute = (clicks: SolveClick[], startDelay = 0): SolveRoute | null => {
+      const steps: Coordinates[] = [start];
+      const ticks: Coordinates[] = [start];
+      for (let d = 0; d < startDelay; d++) ticks.push(start);
+      let at = start;
+      for (const { tile, wait, early } of clicks) {
+        const leg = pathTo(treeFrom(at), tile);
+        if (!leg) return null;
+        let legTicks = runTicks(leg);
+        if (early && legTicks.length > 1) legTicks = legTicks.slice(0, -1);
+        steps.push(...leg.slice(1));
+        ticks.push(...legTicks);
+        if (legTicks.length) at = legTicks[legTicks.length - 1];
+        for (let w = 0; w < wait; w++) ticks.push(at);
+      }
+      return { clicks, steps, ticks };
+    };
+
+    // Candidates: stay put, one click to anywhere close, and A/B steps - out to a nearby tile, wait,
+    // then back - which is how you get two mobs to see you on different ticks.
+    const open = (x: number, y: number) =>
+      x >= 0 && y >= 0 && x < MAP_WIDTH && y < MAP_HEIGHT && !this.isPillar(x, y);
+    const routes: SolveRoute[] = [];
+    const add = (clicks: SolveClick[]) => {
+      const route = buildRoute(clicks);
+      if (route) routes.push(route);
+    };
+    add([]);
+    for (let y = start[1] - 6; y <= start[1] + 6; y++) {
+      for (let x = start[0] - 6; x <= start[0] + 6; x++) {
+        if ((x === start[0] && y === start[1]) || !open(x, y)) continue;
+        add([{ tile: [x, y], wait: 0 }]);
+      }
+    }
+    for (let dy = -2; dy <= 2; dy++) {
+      for (let dx = -2; dx <= 2; dx++) {
+        const out: Coordinates = [start[0] + dx, start[1] + dy];
+        if ((dx === 0 && dy === 0) || !open(out[0], out[1])) continue;
+        for (let wait = 0; wait <= 4; wait++) add([{ tile: out, wait }, { tile: start, wait: 0 }]);
+      }
+    }
+
+    const evaluate = (route: SolveRoute) => {
+      const sim = this.runEngine(route.ticks, HOLD);
+      const [px, py] = sim.selected;
+      if (sim.mobs.some((m) => m[2] < 8 && this.doesCollide(px, py, 1, m[0], m[1], NPC_INFO[m[2]].size))) return null;
+
+      const timeline = readTimeline(sim.tape as number[][], types, knownPattern);
+      const from = route.ticks.length - 1 + SETTLE;
+      const plan = flickPlan(timeline, from, timeline.length);
+      // Every tick has to be flickable once you've arrived. Nothing attacking at all is fine - that's
+      // a safespot, e.g. hitting a melee mob diagonally when it can't hit you back.
+      if (plan.clashes > 0) return null;
+      // You're melee, so something has to be in your reach to fight.
+      const inReach = sim.mobs.filter(
+        (m) => m[2] < 8 && this.hasLOS(m[0], m[1], px, py, NPC_INFO[m[2]].size, reach, true, diagonals),
+      );
+      if (inReach.length === 0) return null;
+
+      // Damage before the rhythm settles: ticks where two styles land at once, so you pray the one
+      // that would have hurt most and take the rest.
+      let damage = 0;
+      for (let tick = 0; tick < from && tick < timeline.length; tick++) {
+        const attacks = timeline[tick];
+        if (!tickPrayer(attacks).clash) continue;
+        const byStyle = new Map<PrayerStyle, number>();
+        for (const a of attacks) {
+          const cost = expectedAttackDamage(a.type, a.style, this.playerDefence, this.invocations);
+          byStyle.set(a.style, (byStyle.get(a.style) ?? 0) + cost);
+        }
+        const costs = [...byStyle.values()];
+        damage += costs.reduce((sum, c) => sum + c, 0) - Math.max(...costs);
+      }
+
+      const fightingMinotaur = inReach.some((m) => m[2] === MINOTAUR);
+      const onOrbit = this.solarflare && this.isOnSolarflareOrbit(px, py);
+      let score =
+        route.clicks.length * CLICK_PENALTY +
+        (route.ticks.length - 1) * 10 +
+        damage * 50 +
+        plan.switches * SWITCH_PENALTY +
+        plan.tightSwitches * TIGHT_SWITCH_PENALTY;
+      if (minotaurAlive) score += fightingMinotaur ? -5000 : 5000;
+      if (onOrbit) score += SOLARFLARE_END_PENALTY;
+      const attackers = [...new Set(plan.sequence.flatMap((s) => s.mobs))];
+      return { route, score, plan, damage, inReach, attackers, onOrbit };
+    };
+
+    type MetaResult = NonNullable<ReturnType<typeof evaluate>>;
+    const results = routes
+      .map(evaluate)
+      .filter((r): r is MetaResult => r !== null)
+      .sort((a, b) => a.score - b.score);
+
+    // Off-ticks hinge on timing, so prefer a plan that still flicks with the start a tick late, or
+    // any click a tick early or late.
+    const holdsUp = (route: SolveRoute) => {
+      const { clicks } = route;
+      const variants: Array<SolveRoute | null> = [];
+      if (clicks.length > 0) variants.push(buildRoute(clicks, 1));
+      for (let i = 0; i < clicks.length - 1; i++) {
+        variants.push(buildRoute(clicks.map((c, j) => (j === i ? { ...c, wait: c.wait + 1 } : c))));
+        variants.push(
+          buildRoute(
+            clicks.map((c, j) => (j === i ? (c.wait > 0 ? { ...c, wait: c.wait - 1 } : { ...c, early: true }) : c)),
+          ),
+        );
+      }
+      return variants.every((v) => !v || evaluate(v) !== null);
+    };
+    let chosen: MetaResult | null = null;
+    let fragile = false;
+    for (const result of results.slice(0, 15)) {
+      if (holdsUp(result.route)) {
+        chosen = result;
+        break;
+      }
+    }
+    if (!chosen && results.length > 0) {
+      chosen = results[0];
+      fragile = true;
+    }
+
+    this.suggestedStartHidden = false;
+    if (!chosen) {
+      this.suggestedPath = null;
+      this.suggestedClicks = [];
+      this.solveRoute = null;
+      this.solveEndAttackable = false;
+      this.solveSummary = "No meta solve from here - nothing settles into a flickable rhythm. Try Solve Tank Path.";
+      this.solveTone = "bad";
+      this.updateUi();
+      this.drawWave();
+      return;
+    }
+
+    const { route, plan, damage, inReach, attackers } = chosen;
+    this.suggestedPath = route.steps;
+    this.suggestedClicks = route.clicks;
+    this.solveEndAttackable = true;
+
+    const cycle = attackers.some((i) => types[i] === MANTICORE) ? 10 : 5;
+    const counts = new Map<string, number>();
+    for (const i of attackers) {
+      const name = NPC_DISPLAY_NAME[types[i]] ?? "mob";
+      counts.set(name, (counts.get(name) ?? 0) + 1);
+    }
+    const plural = (name: string) => (name.endsWith("us") ? `${name.slice(0, -2)}i` : `${name}s`);
+    const names = [...counts].map(([name, n]) => (n > 1 ? `${n} ${plural(name)}` : name));
+    const who = names.length > 1 ? `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}` : names[0];
+    const target = inReach.find((m) => m[2] === MINOTAUR) ?? inReach[0];
+    const onePrayer = new Set(plan.sequence.map((s) => s.prayer)).size === 1;
+    const opening =
+      attackers.length === 0
+        ? "Safespot - nothing can hit you here."
+        : attackers.length === 1
+          ? `1v1 vs ${who}.`
+          : onePrayer
+            ? `${who} on you.`
+            : `${who} off-ticked.`;
+    const warnings =
+      (fragile ? " Tight timing - click right on the tick." : "") +
+      (plan.tightSwitches > 0 ? " Needs 1-tick flicks." : "") +
+      (chosen.onOrbit ? " You'll be next to a pillar, watch the Solarflare." : "");
+    this.solveSummary =
+      `Meta: ${opening} Attack the ${NPC_DISPLAY_NAME[target[2]] ?? "target"}.` +
+      (attackers.length > 0 ? ` ${describeRhythm(plan.sequence, cycle)}` : "") +
+      warnings;
+    this.solveTone = warnings ? "warn" : "good";
+
+    const clickCount = route.clicks.length;
+    const routeTicks = route.ticks.length - 1;
+    const damageText = ` About ${Math.round(damage)} damage if you flick perfectly.`;
+    this.solveRoute =
+      clickCount === 0
+        ? `Stay where you are.${damageText}`
+        : `${clickCount} click${clickCount === 1 ? "" : "s"}, ${routeTicks} tick${routeTicks === 1 ? "" : "s"}.` +
+          (route.clicks.some((c) => c.wait > 0) ? " Wait where it says." : "") +
+          damageText;
+
+    // Replay a little past arrival so you can watch the rhythm form on the tick strip.
+    const end = route.ticks[route.ticks.length - 1];
+    this.replay = [...route.ticks];
+    for (let i = 0; i < SETTLE + 10; i++) this.replay.push(end);
+    this.replayTick = 0;
+    this.reset();
   }
 
   // Moving first is only worth suggesting when it buys something you'd notice. A plan that scores a

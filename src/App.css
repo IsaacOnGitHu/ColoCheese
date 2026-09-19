@@ -146,6 +146,32 @@ canvas {
   transform: translateY(1px);
 }
 
+.meta-solve-btn {
+  width: 100%;
+  padding: 8px 16px;
+  background: #1c2128;
+  color: #ffcc00;
+  font-size: 13px;
+  font-weight: 700;
+  border: 1px solid #d29922;
+  border-radius: 6px;
+  cursor: pointer;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  transition: all 0.15s ease;
+}
+
+.meta-solve-btn:hover {
+  background: #262c36;
+  box-shadow: 0 0 12px rgba(245, 175, 25, 0.3);
+}
+
+.solve-tank-btn:disabled,
+.meta-solve-btn:disabled {
+  cursor: wait;
+  opacity: 0.8;
+}
+
 /* --- SOLVE RESULT BANNER --- */
 .solve-status {
   padding: 9px 12px;
