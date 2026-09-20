@@ -9,6 +9,7 @@ import {
 import { MobExtra } from "./types";
 import { ManticoreOverlay } from "./ManticoreOverlay";
 import { LineOfSight } from "./lineOfSight";
+import { GUIDE_AUTHORS, GUIDE_TITLE, GUIDE_URL } from "./guideSolves";
 
 import "./App.css";
 import { DEFAULT_WEAPON_MODE, NpcType, WEAPON_MODES, WeaponMode } from "./constants";
@@ -133,6 +134,7 @@ function App() {
   const solveTone = uiState?.solveTone;
   const solveRoute = uiState?.solveRoute;
   const startHidden = uiState?.startHidden;
+  const guideNote = uiState?.guideNote;
 
   useEffect(() => {
     lineOfSight?.applySettings(settings);
@@ -302,6 +304,14 @@ function App() {
           {solving === "meta" ? "⏳ Solving..." : "⚡ Meta Solve"}
         </button>
 
+        <p className="meta-credit">
+          Off-tick rhythms follow the community{" "}
+          <a href={GUIDE_URL} target="_blank" rel="noreferrer">
+            {GUIDE_TITLE}
+          </a>{" "}
+          guide by {GUIDE_AUTHORS}.
+        </p>
+
         {solveSummary && (
           <div className={`solve-status ${solveTone}`}>
             {solveSummary}
@@ -314,6 +324,26 @@ function App() {
               </div>
             )}
           </div>
+        )}
+
+        {guideNote && (
+          // Written for the north-west pillar, so it is the same stack shape rather than the same
+          // tiles - the directions read from behind that pillar.
+          <details className="guide-note" key={guideNote.label + (solveSummary ?? "")} open={!solveRoute}>
+            <summary>
+              📖 Community guide: {guideNote.label}
+              {guideNote.unwinnable && " (rated unsolvable)"}
+            </summary>
+            <ol>
+              {guideNote.steps.map((step: string, i: number) => (
+                <li key={i}>{step}</li>
+              ))}
+            </ol>
+            <a href={GUIDE_URL} target="_blank" rel="noreferrer">
+              {GUIDE_TITLE}
+            </a>{" "}
+            by {GUIDE_AUTHORS}, at the NW pillar.
+          </details>
         )}
 
         <div className="card">

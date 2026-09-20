@@ -217,6 +217,22 @@ describe("meta solve through the engine", () => {
     expect(los.solveSummary).toContain("Pray Mage the whole time");
   });
 
+  // Some stacks only come apart if you step out, let something fire, and step back - the shape the
+  // community guide calls a Z-stack. One click can't do it.
+  test("builds a route of several clicks when one won't do", () => {
+    const stack: Placement[] = [
+      [11, 11, N.JAVELIN_COLOSSUS],
+      [11, 8, N.JAVELIN_COLOSSUS],
+      [14, 10, N.MANTICORE, "m"],
+    ];
+    const { los, mobsAtStart } = meta(stack, [7, 9]);
+    expect(los.suggestedPath).not.toBeNull();
+    expect(los.suggestedClicks.length).toBeGreaterThan(1);
+    const { clashes, inReach } = replay(los, mobsAtStart);
+    expect(clashes).toBe(0);
+    expect(inReach.length).toBeGreaterThan(0);
+  });
+
   // Melee mobs can't hit diagonally, but a halberd can. The solver uses that to fight a Jaguar it
   // never has to pray against - check the Jaguar really never lands an attack.
   test("diagonal safespot: fights the Jaguar without it ever attacking", () => {

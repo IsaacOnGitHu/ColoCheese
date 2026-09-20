@@ -3,6 +3,7 @@ import { blockedTileRanges, DEFAULT_WEAPON_MODE, DELAY_FIRST_ATTACK_TICKS, MANTI
 
 import { canBounce, getCenterTile } from "./venator";
 import { buildPathTree, pathTo, pathToFirst, runTicks, type PathTree } from "./playerPathing";
+import { matchGuideSolve } from "./guideSolves";
 import {
   DEFAULT_PLAYER_DEFENCE,
   expectedAttackDamage,
@@ -101,6 +102,8 @@ export class LineOfSight {
   solveTone: "good" | "warn" | "bad" | null = null;
   solveRoute: string | null = null;
   solveEndAttackable: boolean = false;
+  /** The community guide's own advice for this stack, when it covers one like it. */
+  guideNote: { label: string; steps: string[]; unwinnable: boolean } | null = null;
 
   // Solarflare invocation: an orb orbits every pillar, so solves should avoid ending next to one.
   solarflare: boolean = false;
@@ -284,6 +287,7 @@ export class LineOfSight {
     this.solveRoute = null;
     this.solveEndAttackable = false;
     this.suggestedStartHidden = false;
+    this.guideNote = null;
   }
 
   // The Solarflare orb is one tile circling each pillar, so every tile touching a pillar (diagonals
@@ -313,6 +317,7 @@ export class LineOfSight {
       solveTone: this.solveTone,
       solveRoute: this.solveRoute,
       startHidden: this.suggestedStartHidden,
+      guideNote: this.guideNote,
       solarflare: this.solarflare,
     }
     // check if any UI state has changed
@@ -1505,6 +1510,8 @@ export class LineOfSight {
 
   public solveAndDrawTankPath() {
     const start: Coordinates = [this.selected[0], this.selected[1]];
+    // The guide's advice is about off-ticking, so it belongs with a meta solve, not this one.
+    this.guideNote = null;
     // A fragile plan still beats hiding (30000), but a sturdy one from a tile over beats it.
     const FRAGILE_COST = 20000;
     const FULL_SOLVES_FROM_MOVES = 1;
@@ -1636,6 +1643,10 @@ export class LineOfSight {
     const types = this.mobs.map((m) => m[2]);
     const knownPattern = this.mobs.map((m) => m[2] !== MANTICORE || (!!m[6] && m[6] !== "u"));
     const minotaurAlive = types.includes(MINOTAUR);
+    const guide = matchGuideSolve(this.mobs);
+    this.guideNote = guide
+      ? { label: guide.label, steps: guide.steps, unwinnable: !!guide.unwinnable }
+      : null;
 
     const treeCache = new Map<string, PathTree>();
     const treeFrom = (from: Coordinates) => {
@@ -1664,30 +1675,8 @@ export class LineOfSight {
       }
       return { clicks, steps, ticks };
     };
-
-    // Candidates: stay put, one click to anywhere close, and A/B steps - out to a nearby tile, wait,
-    // then back - which is how you get two mobs to see you on different ticks.
     const open = (x: number, y: number) =>
       x >= 0 && y >= 0 && x < MAP_WIDTH && y < MAP_HEIGHT && !this.isPillar(x, y);
-    const routes: SolveRoute[] = [];
-    const add = (clicks: SolveClick[]) => {
-      const route = buildRoute(clicks);
-      if (route) routes.push(route);
-    };
-    add([]);
-    for (let y = start[1] - 6; y <= start[1] + 6; y++) {
-      for (let x = start[0] - 6; x <= start[0] + 6; x++) {
-        if ((x === start[0] && y === start[1]) || !open(x, y)) continue;
-        add([{ tile: [x, y], wait: 0 }]);
-      }
-    }
-    for (let dy = -2; dy <= 2; dy++) {
-      for (let dx = -2; dx <= 2; dx++) {
-        const out: Coordinates = [start[0] + dx, start[1] + dy];
-        if ((dx === 0 && dy === 0) || !open(out[0], out[1])) continue;
-        for (let wait = 0; wait <= 4; wait++) add([{ tile: out, wait }, { tile: start, wait: 0 }]);
-      }
-    }
 
     const evaluate = (route: SolveRoute) => {
       const sim = this.runEngine(route.ticks, HOLD);
@@ -1736,10 +1725,117 @@ export class LineOfSight {
     };
 
     type MetaResult = NonNullable<ReturnType<typeof evaluate>>;
-    const results = routes
-      .map(evaluate)
-      .filter((r): r is MetaResult => r !== null)
-      .sort((a, b) => a.score - b.score);
+    const results: MetaResult[] = [];
+    const routeKey = (route: SolveRoute) => route.ticks.map(([x, y]) => `${x},${y}`).join(">");
+    const tried = new Set<string>();
+    const consider = (route: SolveRoute | null) => {
+      if (!route) return;
+      const result = evaluate(route);
+      if (result) results.push(result);
+    };
+    const add = (clicks: SolveClick[]) => consider(buildRoute(clicks));
+
+    // Candidates: stay put, one click to anywhere close, and A/B steps - out to a nearby tile, wait,
+    // then back - which is how you get two mobs to see you on different ticks.
+    add([]);
+    for (let y = start[1] - 6; y <= start[1] + 6; y++) {
+      for (let x = start[0] - 6; x <= start[0] + 6; x++) {
+        if ((x === start[0] && y === start[1]) || !open(x, y)) continue;
+        add([{ tile: [x, y], wait: 0 }]);
+      }
+    }
+    for (let dy = -2; dy <= 2; dy++) {
+      for (let dx = -2; dx <= 2; dx++) {
+        const out: Coordinates = [start[0] + dx, start[1] + dy];
+        if ((dx === 0 && dy === 0) || !open(out[0], out[1])) continue;
+        for (let wait = 0; wait <= 4; wait++) add([{ tile: out, wait }, { tile: start, wait: 0 }]);
+      }
+    }
+
+    // Longer routes: the community guide calls these "Z-stacks" - step out, drop back behind the
+    // pillar, step out again - and they are how you stagger three mobs that all attack on the same
+    // cycle. Every sequence of clicks is far too much to enumerate, so this keeps a beam of the
+    // prefixes closest to a clean rhythm and only branches to tiles that change who can see you.
+    const DEEP_CLICKS = 4;
+    const BEAM = 20;
+    const BRANCH_RADIUS = 4;
+    const TILES_PER_VIEW = 2;
+    const PROBE_HOLD = 18;
+    const DEEP_BUDGET_MS = 1500;
+
+    // A cheap read on a prefix: how far it is from a flickable rhythm, without the full hold.
+    const rank = (route: SolveRoute) => {
+      const sim = this.runEngine(route.ticks, PROBE_HOLD);
+      const [px, py] = sim.selected;
+      if (sim.mobs.some((m) => m[2] < 8 && this.doesCollide(px, py, 1, m[0], m[1], NPC_INFO[m[2]].size))) return null;
+      const timeline = readTimeline(sim.tape as number[][], types, knownPattern);
+      const plan = flickPlan(timeline, route.ticks.length - 1 + SETTLE, timeline.length);
+      const inReach = sim.mobs.some(
+        (m) => m[2] < 8 && this.hasLOS(m[0], m[1], px, py, NPC_INFO[m[2]].size, reach, true, diagonals),
+      );
+      return plan.clashes * 1000 + (inReach ? 0 : 300) + route.ticks.length;
+    };
+
+    // Where it is worth clicking next: one tile per way of being seen, nearest first. Two tiles that
+    // the same mobs can see play the same, so only the closest of them is worth trying.
+    const branchTiles = (route: SolveRoute) => {
+      const at = route.ticks[route.ticks.length - 1];
+      const mobsThen = this.runEngine(route.ticks, 0).mobs;
+      const byView = new Map<string, Coordinates[]>();
+      for (let radius = 1; radius <= BRANCH_RADIUS; radius++) {
+        for (let dy = -radius; dy <= radius; dy++) {
+          for (let dx = -radius; dx <= radius; dx++) {
+            if (Math.max(Math.abs(dx), Math.abs(dy)) !== radius) continue;
+            const tile: Coordinates = [at[0] + dx, at[1] + dy];
+            if (!open(tile[0], tile[1])) continue;
+            const view = mobsThen
+              .map((m) =>
+                m[2] < 8 &&
+                this.hasLOS(m[0], m[1], tile[0], tile[1], NPC_INFO[m[2]].size, NPC_INFO[m[2]].range, true)
+                  ? "1"
+                  : "0",
+              )
+              .join("");
+            const group = byView.get(view) ?? [];
+            if (group.length < TILES_PER_VIEW) {
+              group.push(tile);
+              byView.set(view, group);
+            }
+          }
+        }
+      }
+      return [...byView.values()].flat();
+    };
+
+    // If a short route already flicks cleanly and takes no damage, nothing longer can be worth the
+    // extra clicks, so don't spend the time looking.
+    const cleanAlready = results.some((r) => r.damage < 1 && r.plan.tightSwitches === 0);
+    const deadline = Date.now() + (cleanAlready ? 0 : DEEP_BUDGET_MS);
+    let beam = [buildRoute([])].filter((r): r is SolveRoute => r !== null);
+    for (let depth = 1; depth <= DEEP_CLICKS && beam.length > 0 && Date.now() < deadline; depth++) {
+      const next: Array<{ route: SolveRoute; score: number }> = [];
+      for (const prefix of beam) {
+        if (Date.now() > deadline) break;
+        for (const tile of branchTiles(prefix)) {
+          for (let wait = 0; wait <= 4; wait++) {
+            const route = buildRoute([...prefix.clicks, { tile, wait }]);
+            if (!route) continue;
+            const key = routeKey(route);
+            if (tried.has(key)) continue;
+            tried.add(key);
+            const score = rank(route);
+            if (score === null) continue;
+            // A prefix that already flicks cleanly is a solve in its own right, so judge it properly.
+            if (score < 1000) consider(route);
+            next.push({ route, score });
+          }
+        }
+      }
+      next.sort((a, b) => a.score - b.score);
+      beam = next.slice(0, BEAM).map((n) => n.route);
+    }
+
+    results.sort((a, b) => a.score - b.score);
 
     // Off-ticks hinge on timing, so prefer a plan that still flicks with the start a tick late, or
     // any click a tick early or late.
@@ -1759,7 +1855,7 @@ export class LineOfSight {
     };
     let chosen: MetaResult | null = null;
     let fragile = false;
-    for (const result of results.slice(0, 15)) {
+    for (const result of results.slice(0, 20)) {
       if (holdsUp(result.route)) {
         chosen = result;
         break;
@@ -1776,7 +1872,9 @@ export class LineOfSight {
       this.suggestedClicks = [];
       this.solveRoute = null;
       this.solveEndAttackable = false;
-      this.solveSummary = "No meta solve from here - nothing settles into a flickable rhythm. Try Solve Tank Path.";
+      this.solveSummary = guide?.unwinnable
+        ? "No meta solve - the guide rates this stack unsolvable, you have to tank something. Press Solve Tank Path for the safest way out."
+        : "No meta solve from here - nothing settles into a flickable rhythm. Press Solve Tank Path to find a 1v1.";
       this.solveTone = "bad";
       this.updateUi();
       this.drawWave();

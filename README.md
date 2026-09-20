@@ -17,6 +17,10 @@ It goes for, in order:
 3. Fewest clicks
 4. Least damage
 
+**Meta Solve** does the opposite: instead of isolating one NPC it off-ticks the stack, so every
+attack lands on a different tick and one prayer, flicked, covers all of them. Where the community
+stack guide covers your stack, its own advice is shown alongside.
+
 The whole plan can be stepped through tick by tick to see how the NPCs react.
 
 ## Credit
@@ -24,6 +28,10 @@ The whole plan can be stepped through tick by tick to see how the NPCs react.
 Built on the Colosseum line of sight tool ([los.colosim.com](https://los.colosim.com)), originally
 written by [Backseat](https://bistools.github.io/inferno.html) and
 [iFreedive](https://ifreedive-osrs.github.io/). Further built upon for cheese tanking.
+
+Off-tick rhythms follow the community guide
+[Colosseum Stack Solves](https://docs.google.com/document/d/e/2PACX-1vR3IqdspMrEAbH60-Z9cOKpM8-H5U49q6ZgqU8wTFSXIj_kAx69qyKakuyMOm2oLRvdV2cGNK2B0kmZ/pub)
+by Help Me RNG, with ro0b0 and ItzSynpah, which is also what Meta Solve is tested against.
 
 ## Development
 

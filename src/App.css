@@ -205,6 +205,45 @@ canvas {
   font-weight: 600;
 }
 
+/* Credit under the Meta Solve button, and the guide's own advice for a stack it covers */
+.meta-credit {
+  margin: -2px 0 0;
+  font-size: 10px;
+  line-height: 1.4;
+  color: #6e7681;
+  text-align: center;
+}
+
+.meta-credit a,
+.guide-note a {
+  color: #8b949e;
+}
+
+.guide-note {
+  padding: 8px 12px;
+  border-radius: 6px;
+  border-left: 4px solid #6e7681;
+  background: #161b22;
+  font-size: 11px;
+  line-height: 1.45;
+  color: #8b949e;
+}
+
+.guide-note summary {
+  cursor: pointer;
+  font-weight: 600;
+  color: #c9d1d9;
+}
+
+.guide-note ol {
+  margin: 6px 0;
+  padding-left: 18px;
+}
+
+.guide-note li {
+  margin-bottom: 3px;
+}
+
 /* Matches the markers drawn on the map */
 .map-key {
   display: flex;
