@@ -1678,7 +1678,7 @@ export class LineOfSight {
     const open = (x: number, y: number) =>
       x >= 0 && y >= 0 && x < MAP_WIDTH && y < MAP_HEIGHT && !this.isPillar(x, y);
 
-    const evaluate = (route: SolveRoute) => {
+    const evaluate = (route: SolveRoute, out?: { noReachOnly?: boolean }) => {
       const sim = this.runEngine(route.ticks, HOLD);
       const [px, py] = sim.selected;
       if (sim.mobs.some((m) => m[2] < 8 && this.doesCollide(px, py, 1, m[0], m[1], NPC_INFO[m[2]].size))) return null;
@@ -1689,11 +1689,15 @@ export class LineOfSight {
       // Every tick has to be flickable once you've arrived. Nothing attacking at all is fine - that's
       // a safespot, e.g. hitting a melee mob diagonally when it can't hit you back.
       if (plan.clashes > 0) return null;
-      // You're melee, so something has to be in your reach to fight.
+      // You're melee, so something has to be in your reach to fight. If the rhythm is good but
+      // nothing is next to you, the route isn't wrong - it just isn't finished yet.
       const inReach = sim.mobs.filter(
         (m) => m[2] < 8 && this.hasLOS(m[0], m[1], px, py, NPC_INFO[m[2]].size, reach, true, diagonals),
       );
-      if (inReach.length === 0) return null;
+      if (inReach.length === 0) {
+        if (out) out.noReachOnly = true;
+        return null;
+      }
 
       // Damage before the rhythm settles: ticks where two styles land at once, so you pray the one
       // that would have hurt most and take the rest.
@@ -1728,10 +1732,49 @@ export class LineOfSight {
     const results: MetaResult[] = [];
     const routeKey = (route: SolveRoute) => route.ticks.map(([x, y]) => `${x},${y}`).join(">");
     const tried = new Set<string>();
-    const consider = (route: SolveRoute | null) => {
+    // Off-ticking a stack and killing something are two different jobs. The community guide does
+    // them in that order: get the stagger from wherever it works - usually well out of melee range -
+    // let it settle, then walk in and fight, which doesn't disturb the rhythm because everything can
+    // already see you. So when a route flicks cleanly but leaves nothing in reach, walk it in and
+    // judge that instead of throwing it away.
+    const WALK_IN_SETTLE = 5;
+    const walkInFrom = (route: SolveRoute): SolveRoute | null => {
+      const sim = this.runEngine(route.ticks, WALK_IN_SETTLE);
+      const at: Coordinates = [sim.selected[0], sim.selected[1]];
+      const leg = pathToFirst(
+        at,
+        MAP_WIDTH,
+        MAP_HEIGHT,
+        (x, y) => this.isPillar(x, y),
+        (x, y) =>
+          sim.mobs.some(
+            (m) => m[2] < 8 && this.hasLOS(m[0], m[1], x, y, NPC_INFO[m[2]].size, reach, true, diagonals),
+          ),
+      );
+      if (!leg || leg.length < 2) return null;
+      const target = leg[leg.length - 1];
+      if (route.clicks.length === 0) return buildRoute([{ tile: target, wait: 0 }], WALK_IN_SETTLE);
+      const clicks = route.clicks.map((c, i) =>
+        i === route.clicks.length - 1 ? { ...c, wait: c.wait + WALK_IN_SETTLE } : c,
+      );
+      return buildRoute([...clicks, { tile: target, wait: 0 }]);
+    };
+    const walkedIn = new Set<string>();
+    const consider = (route: SolveRoute | null, allowWalkIn = true) => {
       if (!route) return;
-      const result = evaluate(route);
-      if (result) results.push(result);
+      const out: { noReachOnly?: boolean } = {};
+      const result = evaluate(route, out);
+      if (result) {
+        results.push(result);
+        return;
+      }
+      if (!allowWalkIn || !out.noReachOnly) return;
+      const extended = walkInFrom(route);
+      if (!extended) return;
+      const key = routeKey(extended);
+      if (walkedIn.has(key)) return;
+      walkedIn.add(key);
+      consider(extended, false);
     };
     const add = (clicks: SolveClick[]) => consider(buildRoute(clicks));
 

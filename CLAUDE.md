@@ -92,14 +92,28 @@ one click nearby, out-and-back, and a **beam search** for longer routes that bra
 which change who can see you. It stops early when a short route already flicks cleanly for no
 damage, which keeps the common case at ~35ms.
 
-A route is rejected outright if any tick after arrival needs two prayers at once, or if nothing ends
-up in reach to attack. Scoring: click 1000, tick 10, damage ×50, prayer switch 300, a switch on
+A route is rejected outright if any tick after arrival needs two prayers at once. Ending with
+nothing in melee reach is *not* a rejection: off-ticking and killing are separate jobs, and the
+community guide does them in that order - take the stagger wherever it works, usually well out of
+range, let it settle, then walk in. Closing the distance doesn't disturb the rhythm, because
+everything can already see you and the cycles are cooldown-driven from there. `walkInFrom` appends
+that leg and the extended route is judged normally. This matters: 18 of the 21 routes the guide's
+author recorded end out of melee range, and rejecting them was why Meta Solve used to come up empty
+on stacks the guide clearly solves.
+
+Scoring: click 1000, tick 10, damage ×50, prayer switch 300, a switch on
 consecutive ticks between different mobs 1500 (this is what people actually fumble), Solarflare
 20000, Minotaur ∓5000. `holdsUp` re-checks the plan with each click a tick early or late; plans that
 don't survive are shown with a "tight timing" warning.
 
-**Known gap:** the guide's true Z-stacks are a repeating dance with no final tile. Our routes arrive
-somewhere and hold, so we can't express them, and those stacks fall back to the guide's own text.
+**Known gap:** Meta Solve only solves from the tile you are standing on. Tank Path looks for a better
+hidden tile first and shows it as a blue S; Meta Solve doesn't. Every guide stack it still fails on
+is one whose written solve begins "go all the way west" or "move 2 tiles back" - the answer exists,
+it just starts somewhere else.
+
+(A note on "Z-stacks", which the guide's text makes look like a perpetual dance: the *prayers* cycle,
+not the movement. The recorded routes make three or four moves and then stand still. They are well
+within what our routes can express.)
 
 ## How changes get verified
 

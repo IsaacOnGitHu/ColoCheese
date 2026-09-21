@@ -62,8 +62,9 @@ describe("the community guide's own advice", () => {
   test("with no meta solve it sends you to the tank path", () => {
     const los = new LineOfSight() as any;
     los.weaponMode = DEFAULT_WEAPON_MODE;
-    // The guide's "range + mage + range" Z-stack. Its solve is a movement loop that never settles on
-    // one tile, which is not something a route of clicks can express, so we have nothing to offer.
+    // The guide's "range + mage + range" Z-stack. Its solve starts from further west than we are
+    // standing, and Meta Solve only searches from the tile it is given, so we have nothing to offer
+    // here yet - but the guide's own advice still shows.
     for (const [x, y, type] of [
       [11, 10, N.JAVELIN_COLOSSUS],
       [17, 10, N.JAVELIN_COLOSSUS],
