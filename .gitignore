@@ -25,3 +25,5 @@ dist-ssr
 
 # Local editor/agent config (contains local paths)
 .claude
+# Working notes for the solvers - kept on this machine, not published
+CLAUDE.md
