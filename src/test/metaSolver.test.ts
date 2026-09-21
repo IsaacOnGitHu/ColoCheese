@@ -202,7 +202,8 @@ describe("meta solve through the engine", () => {
     const { clashes, inReach } = replay(los, mobsAtStart);
     expect(clashes).toBe(0);
     expect(inReach.length).toBeGreaterThan(0);
-    expect(los.suggestedStartHidden).toBe(false);
+    // The route may begin by walking to a hidden tile; either way the replay covers the whole thing.
+    expect(los.replay[0]).toEqual(start);
   });
 
   test("goes for the Minotaur and off-ticks the rest", () => {

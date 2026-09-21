@@ -106,10 +106,18 @@ consecutive ticks between different mobs 1500 (this is what people actually fumb
 20000, Minotaur ∓5000. `holdsUp` re-checks the plan with each click a tick early or late; plans that
 don't survive are shown with a "tight timing" warning.
 
-**Known gap:** Meta Solve only solves from the tile you are standing on. Tank Path looks for a better
-hidden tile first and shows it as a blue S; Meta Solve doesn't. Every guide stack it still fails on
-is one whose written solve begins "go all the way west" or "move 2 tiles back" - the answer exists,
-it just starts somewhere else.
+Like the tank path, it can start somewhere else: `findMetaPlan` solves from one tile, and `solveMeta`
+ranks the hidden tiles you can walk to with quick plans before paying for a full solve of the best
+one. The guide's solves nearly all begin this way - "go all the way west", "take 1 step back" - and
+this is what closed the last of them. `isWorthMovingMeta` keeps it from wandering: moving has to drop
+a fragility, drop a 1-tick flick, save a click or save 5 damage. On random stacks only 2 in 149 move
+at all.
+
+Cost control matters here, because the work multiplies: a full solve of the tile you're on, then
+quick plans for up to a couple of dozen hidden tiles, then one more full solve. The fast path is
+`isClean` - a plan with no damage, no fragility and no 1-tick flicks is never improved on, so the
+hidden-tile scan is skipped entirely. Random stacks come back in ~66ms; the guide's hard ones take
+1-2s.
 
 (A note on "Z-stacks", which the guide's text makes look like a perpetual dance: the *prayers* cycle,
 not the movement. The recorded routes make three or four moves and then stand still. They are well
@@ -127,7 +135,9 @@ The solves are the product. Assume any change breaks something until shown other
    worktree) and diff the output. "Tank solves byte-identical" is the bar for any change that isn't
    meant to touch them.
 3. **The guide corpus.** The community guide has 85 real stacks in this tool's URL format - the best
-   regression set there is. Meta Solve currently solves 47 of them.
+   regression set there is. Meta Solve currently solves all 85, and 21 of its entries carry the
+   author's own tick-by-tick route, which is the closest thing to ground truth available: replay
+   those and check our engine agrees.
 4. A test that can silently pass when no solve is found is not a test. Assert `suggestedPath` is not
    null.
 

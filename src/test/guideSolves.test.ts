@@ -59,12 +59,11 @@ describe("the community guide's own advice", () => {
     expect(los.getUiState().guideNote).toEqual(los.guideNote);
   });
 
-  test("with no meta solve it sends you to the tank path", () => {
+  test("solves the guide's Z-stack by walking west first, and still shows its advice", () => {
     const los = new LineOfSight() as any;
     los.weaponMode = DEFAULT_WEAPON_MODE;
-    // The guide's "range + mage + range" Z-stack. Its solve starts from further west than we are
-    // standing, and Meta Solve only searches from the tile it is given, so we have nothing to offer
-    // here yet - but the guide's own advice still shows.
+    // The guide's "range + mage + range". Its written solve begins "move 2 tiles west", and we only
+    // find it because Meta Solve looks for a better hidden tile before solving.
     for (const [x, y, type] of [
       [11, 10, N.JAVELIN_COLOSSUS],
       [17, 10, N.JAVELIN_COLOSSUS],
@@ -75,10 +74,19 @@ describe("the community guide's own advice", () => {
     }
     los._setSelected([7, 9], 0);
     los.solveMeta();
+    expect(los.suggestedPath).not.toBeNull();
+    expect(los.suggestedStartHidden).toBe(true);
+    expect(los.solveRoute).toContain("Start on S");
+    expect(los.guideNote?.label).toBe("range + mage + range");
+  });
+
+  test("with nothing to fight it sends you to the tank path", () => {
+    const los = new LineOfSight() as any;
+    los.weaponMode = DEFAULT_WEAPON_MODE;
+    los._setSelected([7, 9], 0);
+    los.solveMeta();
     expect(los.suggestedPath).toBeNull();
     expect(los.solveSummary).toContain("Solve Tank Path");
     expect(los.solveTone).toBe("bad");
-    // The guide still has its own answer for it.
-    expect(los.guideNote?.label).toBe("range + mage + range");
   });
 });

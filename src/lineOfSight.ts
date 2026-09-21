@@ -1613,9 +1613,9 @@ export class LineOfSight {
   // ---------------------------------------------------------------------------------------------
 
   // Plays `ticks`, then holds the last tile for `hold` more, through a fresh copy of the engine.
-  private runEngine(ticks: Coordinates[], hold: number) {
+  private runEngine(ticks: Coordinates[], hold: number, mobs: Mob[] = this.mobs) {
     const sim = new LineOfSight();
-    sim.mobs = JSON.parse(JSON.stringify(this.mobs));
+    sim.mobs = JSON.parse(JSON.stringify(mobs));
     sim.mantimayhem3 = this.mantimayhem3;
     sim.manticoreTicksRemaining = { ...this.manticoreTicksRemaining };
     const path = [...ticks];
@@ -1627,8 +1627,9 @@ export class LineOfSight {
     return sim;
   }
 
-  public solveMeta() {
-    const start: Coordinates = [this.selected[0], this.selected[1]];
+  // One meta plan from one starting tile. `quick` skips the long-route search and the timing
+  // checks, which is enough to rank a candidate start tile without paying for a full solve.
+  private findMetaPlan(start: Coordinates, mobs: Mob[], quick = false) {
     const { reach, diagonals } = WEAPON_MODES[this.weaponMode];
     // Ticks simulated after the route ends, and how many of those to let settle before judging.
     const HOLD = 40;
@@ -1640,13 +1641,9 @@ export class LineOfSight {
     const TIGHT_SWITCH_PENALTY = 1500;
     const SOLARFLARE_END_PENALTY = 20000;
 
-    const types = this.mobs.map((m) => m[2]);
-    const knownPattern = this.mobs.map((m) => m[2] !== MANTICORE || (!!m[6] && m[6] !== "u"));
+    const types = mobs.map((m) => m[2]);
+    const knownPattern = mobs.map((m) => m[2] !== MANTICORE || (!!m[6] && m[6] !== "u"));
     const minotaurAlive = types.includes(MINOTAUR);
-    const guide = matchGuideSolve(this.mobs);
-    this.guideNote = guide
-      ? { label: guide.label, steps: guide.steps, unwinnable: !!guide.unwinnable }
-      : null;
 
     const treeCache = new Map<string, PathTree>();
     const treeFrom = (from: Coordinates) => {
@@ -1679,7 +1676,7 @@ export class LineOfSight {
       x >= 0 && y >= 0 && x < MAP_WIDTH && y < MAP_HEIGHT && !this.isPillar(x, y);
 
     const evaluate = (route: SolveRoute, out?: { noReachOnly?: boolean }) => {
-      const sim = this.runEngine(route.ticks, HOLD);
+      const sim = this.runEngine(route.ticks, HOLD, mobs);
       const [px, py] = sim.selected;
       if (sim.mobs.some((m) => m[2] < 8 && this.doesCollide(px, py, 1, m[0], m[1], NPC_INFO[m[2]].size))) return null;
 
@@ -1739,7 +1736,7 @@ export class LineOfSight {
     // judge that instead of throwing it away.
     const WALK_IN_SETTLE = 5;
     const walkInFrom = (route: SolveRoute): SolveRoute | null => {
-      const sim = this.runEngine(route.ticks, WALK_IN_SETTLE);
+      const sim = this.runEngine(route.ticks, WALK_IN_SETTLE, mobs);
       const at: Coordinates = [sim.selected[0], sim.selected[1]];
       const leg = pathToFirst(
         at,
@@ -1800,15 +1797,15 @@ export class LineOfSight {
     // cycle. Every sequence of clicks is far too much to enumerate, so this keeps a beam of the
     // prefixes closest to a clean rhythm and only branches to tiles that change who can see you.
     const DEEP_CLICKS = 4;
-    const BEAM = 20;
+    const BEAM = 14;
     const BRANCH_RADIUS = 4;
-    const TILES_PER_VIEW = 2;
+    const TILES_PER_VIEW = 1;
     const PROBE_HOLD = 18;
-    const DEEP_BUDGET_MS = 1500;
+    const DEEP_BUDGET_MS = 900;
 
     // A cheap read on a prefix: how far it is from a flickable rhythm, without the full hold.
     const rank = (route: SolveRoute) => {
-      const sim = this.runEngine(route.ticks, PROBE_HOLD);
+      const sim = this.runEngine(route.ticks, PROBE_HOLD, mobs);
       const [px, py] = sim.selected;
       if (sim.mobs.some((m) => m[2] < 8 && this.doesCollide(px, py, 1, m[0], m[1], NPC_INFO[m[2]].size))) return null;
       const timeline = readTimeline(sim.tape as number[][], types, knownPattern);
@@ -1823,7 +1820,7 @@ export class LineOfSight {
     // the same mobs can see play the same, so only the closest of them is worth trying.
     const branchTiles = (route: SolveRoute) => {
       const at = route.ticks[route.ticks.length - 1];
-      const mobsThen = this.runEngine(route.ticks, 0).mobs;
+      const mobsThen = this.runEngine(route.ticks, 0, mobs).mobs;
       const byView = new Map<string, Coordinates[]>();
       for (let radius = 1; radius <= BRANCH_RADIUS; radius++) {
         for (let dy = -radius; dy <= radius; dy++) {
@@ -1853,7 +1850,7 @@ export class LineOfSight {
     // If a short route already flicks cleanly and takes no damage, nothing longer can be worth the
     // extra clicks, so don't spend the time looking.
     const cleanAlready = results.some((r) => r.damage < 1 && r.plan.tightSwitches === 0);
-    const deadline = Date.now() + (cleanAlready ? 0 : DEEP_BUDGET_MS);
+    const deadline = Date.now() + (quick || cleanAlready ? 0 : DEEP_BUDGET_MS);
     let beam = [buildRoute([])].filter((r): r is SolveRoute => r !== null);
     for (let depth = 1; depth <= DEEP_CLICKS && beam.length > 0 && Date.now() < deadline; depth++) {
       const next: Array<{ route: SolveRoute; score: number }> = [];
@@ -1898,19 +1895,84 @@ export class LineOfSight {
     };
     let chosen: MetaResult | null = null;
     let fragile = false;
-    for (const result of results.slice(0, 20)) {
-      if (holdsUp(result.route)) {
-        chosen = result;
-        break;
+    if (quick) {
+      chosen = results[0] ?? null;
+    } else {
+      for (const result of results.slice(0, 20)) {
+        if (holdsUp(result.route)) {
+          chosen = result;
+          break;
+        }
+      }
+      if (!chosen && results.length > 0) {
+        chosen = results[0];
+        fragile = true;
       }
     }
-    if (!chosen && results.length > 0) {
-      chosen = results[0];
-      fragile = true;
+    return chosen ? { ...chosen, fragile } : null;
+  }
+
+
+  // A hidden tile you walk to costs nothing in timing, but it still has to buy something: the same
+  // rule as the tank path, read in flicking terms.
+  private isWorthMovingMeta(
+    stay: NonNullable<ReturnType<LineOfSight["findMetaPlan"]>>,
+    move: NonNullable<ReturnType<LineOfSight["findMetaPlan"]>>,
+  ) {
+    return (
+      (stay.fragile && !move.fragile) ||
+      (stay.plan.tightSwitches > 0 && move.plan.tightSwitches === 0) ||
+      // the walk to the hidden tile counts as a click
+      move.route.clicks.length + 1 < stay.route.clicks.length ||
+      stay.damage - move.damage >= 5
+    );
+  }
+
+  public solveMeta() {
+    const start: Coordinates = [this.selected[0], this.selected[1]];
+    const REPLAY_HOLD = 15;
+    const guide = matchGuideSolve(this.mobs);
+    this.guideNote = guide
+      ? { label: guide.label, steps: guide.steps, unwinnable: !!guide.unwinnable }
+      : null;
+
+    // As with the tank path, you don't have to solve from the tile you're standing on. Any tile you
+    // can walk to unseen is just as good a start, and the community guide's solves nearly all begin
+    // by moving first - "go all the way west", "take 1 step back". A quick plan from each candidate
+    // ranks them and only the best gets a full solve, so this costs nothing when you're already
+    // somewhere that works.
+    const META_MAX_STEPS = 6;
+    const RANK_BUDGET_MS = 1200;
+    type MetaPlan = NonNullable<ReturnType<LineOfSight["findMetaPlan"]>>;
+    const isClean = (p: MetaPlan) => !p.fragile && p.damage < 1 && p.plan.tightSwitches === 0;
+
+    let best = this.findMetaPlan(start, this.mobs);
+    let lead: ReturnType<LineOfSight["hiddenMoves"]>[number] | null = null;
+
+    if (!this.fromWaveStart && !(best && isClean(best))) {
+      const moves = this.hiddenMoves(start, META_MAX_STEPS).sort((a, b) => a.ticks.length - b.ticks.length);
+      const deadline = Date.now() + RANK_BUDGET_MS;
+      let pick: { move: (typeof moves)[number]; score: number } | null = null;
+      for (const move of moves) {
+        if (Date.now() > deadline) break;
+        const quick = this.findMetaPlan(move.at, move.mobs, true);
+        if (!quick) continue;
+        const score = quick.score + move.cost;
+        if (!pick || score < pick.score) pick = { move, score };
+        // Nothing further out is going to beat a clean rhythm from here.
+        if (isClean(quick)) break;
+      }
+      if (pick && (!best || pick.score < best.score)) {
+        const plan = this.findMetaPlan(pick.move.at, pick.move.mobs);
+        if (plan && (!best || (plan.score + pick.move.cost < best.score && this.isWorthMovingMeta(best, plan)))) {
+          best = plan;
+          lead = pick.move;
+        }
+      }
     }
 
     this.suggestedStartHidden = false;
-    if (!chosen) {
+    if (!best) {
       this.suggestedPath = null;
       this.suggestedClicks = [];
       this.solveRoute = null;
@@ -1924,11 +1986,20 @@ export class LineOfSight {
       return;
     }
 
-    const { route, plan, damage, inReach, attackers } = chosen;
-    this.suggestedPath = route.steps;
-    this.suggestedClicks = route.clicks;
+    const { route, plan, damage, inReach, attackers, fragile } = best;
+    // The plan from the hidden tile starts by standing there one tick, so the first click's wait
+    // absorbs it.
+    const clicks: SolveClick[] = lead
+      ? [{ tile: lead.at, wait: route.clicks.length ? lead.wait + 1 : 0 }, ...route.clicks]
+      : route.clicks;
+    const steps = lead ? [...lead.steps, ...route.steps.slice(1)] : route.steps;
+    const ticks = lead ? [...lead.ticks, ...route.ticks] : route.ticks;
+    this.suggestedPath = steps;
+    this.suggestedClicks = clicks;
+    this.suggestedStartHidden = lead !== null;
     this.solveEndAttackable = true;
 
+    const types = this.mobs.map((m) => m[2]);
     const cycle = attackers.some((i) => types[i] === MANTICORE) ? 10 : 5;
     const counts = new Map<string, number>();
     for (const i of attackers) {
@@ -1951,27 +2022,33 @@ export class LineOfSight {
     const warnings =
       (fragile ? " Tight timing - click right on the tick." : "") +
       (plan.tightSwitches > 0 ? " Needs 1-tick flicks." : "") +
-      (chosen.onOrbit ? " You'll be next to a pillar, watch the Solarflare." : "");
+      (best.onOrbit ? " You'll be next to a pillar, watch the Solarflare." : "");
     this.solveSummary =
       `Meta: ${opening} Attack the ${NPC_DISPLAY_NAME[target[2]] ?? "target"}.` +
       (attackers.length > 0 ? ` ${describeRhythm(plan.sequence, cycle)}` : "") +
       warnings;
     this.solveTone = warnings ? "warn" : "good";
 
-    const clickCount = route.clicks.length;
-    const routeTicks = route.ticks.length - 1;
+    // The walk to S isn't counted: nothing can see you and the mobs have settled, so there's no
+    // timing to it. Clicks and ticks are counted from S.
+    const timed = lead ? route : { clicks, ticks };
+    const clickCount = timed.clicks.length;
+    const routeTicks = timed.ticks.length - 1;
+    const walkToStart = lead ? "Start on S. " : "";
     const damageText = ` About ${Math.round(damage)} damage if you flick perfectly.`;
     this.solveRoute =
       clickCount === 0
-        ? `Stay where you are.${damageText}`
-        : `${clickCount} click${clickCount === 1 ? "" : "s"}, ${routeTicks} tick${routeTicks === 1 ? "" : "s"}.` +
-          (route.clicks.some((c) => c.wait > 0) ? " Wait where it says." : "") +
+        ? lead
+          ? `${walkToStart}Then stay put.${damageText}`
+          : `Stay where you are.${damageText}`
+        : `${walkToStart}${lead ? "Then " : ""}${clickCount} click${clickCount === 1 ? "" : "s"}, ${routeTicks} tick${routeTicks === 1 ? "" : "s"}.` +
+          (timed.clicks.some((c) => c.wait > 0) ? " Wait where it says." : "") +
           damageText;
 
     // Replay a little past arrival so you can watch the rhythm form on the tick strip.
-    const end = route.ticks[route.ticks.length - 1];
-    this.replay = [...route.ticks];
-    for (let i = 0; i < SETTLE + 10; i++) this.replay.push(end);
+    const end = ticks[ticks.length - 1];
+    this.replay = [...ticks];
+    for (let i = 0; i < REPLAY_HOLD; i++) this.replay.push(end);
     this.replayTick = 0;
     this.reset();
   }
@@ -1995,8 +2072,7 @@ export class LineOfSight {
 
   // Tiles a few steps away you can walk to without anything seeing you, with the mobs as they'll be
   // once they've stopped reacting to the move.
-  private hiddenMoves(start: Coordinates) {
-    const MAX_STEPS = 2;
+  private hiddenMoves(start: Coordinates, MAX_STEPS = 2) {
     const SETTLE_MAX = 15;
     const CALM_TICKS = 3;
     // Much less than a click in the solver (1000): you walk there while hidden with no timing to hit,
