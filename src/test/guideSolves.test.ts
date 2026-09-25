@@ -77,6 +77,15 @@ describe("the community guide's own advice", () => {
     expect(los.suggestedPath).not.toBeNull();
     expect(los.suggestedStartHidden).toBe(true);
     expect(los.solveRoute).toContain("Start on S");
+    // and it gives back the movement the guide's author recorded, not one of our own
+    expect(los.solveRoute).toContain("community guide's own move");
+    expect(los.suggestedClicks.map((c: any) => c.tile)).toEqual([
+      [5, 9],
+      [5, 11],
+      [7, 9],
+      [7, 11],
+      [10, 11],
+    ]);
     expect(los.guideNote?.label).toBe("range + mage + range");
   });
 

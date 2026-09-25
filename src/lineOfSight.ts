@@ -4,6 +4,7 @@ import { blockedTileRanges, DEFAULT_WEAPON_MODE, DELAY_FIRST_ATTACK_TICKS, MANTI
 import { canBounce, getCenterTile } from "./venator";
 import { buildPathTree, pathTo, pathToFirst, runTicks, type PathTree } from "./playerPathing";
 import { matchGuideSolve } from "./guideSolves";
+import { OFF_TICK_PATTERNS, PILLAR_CENTRES, placePattern } from "./guidePatterns";
 import {
   DEFAULT_PLAYER_DEFENCE,
   expectedAttackDamage,
@@ -20,7 +21,7 @@ import { computeReplayBounds, convertMobSpecToMob, copyQ, decodeURL, encodeCoord
 /** One click in a solved route: the tile to click, and how many ticks to stand on it afterwards. */
 export type SolveClick = { tile: Coordinates; wait: number; early?: boolean };
 /** `steps` is the tile-by-tile walk (for drawing); `ticks` is the position after each tick. */
-type SolveRoute = { clicks: SolveClick[]; steps: Coordinates[]; ticks: Coordinates[] };
+type SolveRoute = { clicks: SolveClick[]; steps: Coordinates[]; ticks: Coordinates[]; fromPattern?: boolean };
 
 const PILLAR_COORDS = [
   [8, 10],
@@ -1629,7 +1630,7 @@ export class LineOfSight {
 
   // One meta plan from one starting tile. `quick` skips the long-route search and the timing
   // checks, which is enough to rank a candidate start tile without paying for a full solve.
-  private findMetaPlan(start: Coordinates, mobs: Mob[], quick = false) {
+  private findMetaPlan(start: Coordinates, mobs: Mob[], quick = false, patterns: Coordinates[][] = []) {
     const { reach, diagonals } = WEAPON_MODES[this.weaponMode];
     // Ticks simulated after the route ends, and how many of those to let settle before judging.
     const HOLD = 40;
@@ -1750,11 +1751,18 @@ export class LineOfSight {
       );
       if (!leg || leg.length < 2) return null;
       const target = leg[leg.length - 1];
-      if (route.clicks.length === 0) return buildRoute([{ tile: target, wait: 0 }], WALK_IN_SETTLE);
-      const clicks = route.clicks.map((c, i) =>
-        i === route.clicks.length - 1 ? { ...c, wait: c.wait + WALK_IN_SETTLE } : c,
-      );
-      return buildRoute([...clicks, { tile: target, wait: 0 }]);
+      // Walking in is the same plan carried a few tiles further, so it keeps where it came from.
+      const extended =
+        route.clicks.length === 0
+          ? buildRoute([{ tile: target, wait: 0 }], WALK_IN_SETTLE)
+          : buildRoute([
+              ...route.clicks.map((c, i) =>
+                i === route.clicks.length - 1 ? { ...c, wait: c.wait + WALK_IN_SETTLE } : c,
+              ),
+              { tile: target, wait: 0 },
+            ]);
+      if (extended) extended.fromPattern = route.fromPattern;
+      return extended;
     };
     const walkedIn = new Set<string>();
     const consider = (route: SolveRoute | null, allowWalkIn = true) => {
@@ -1775,9 +1783,82 @@ export class LineOfSight {
     };
     const add = (clicks: SolveClick[]) => consider(buildRoute(clicks));
 
-    // Candidates: stay put, one click to anywhere close, and A/B steps - out to a nearby tile, wait,
-    // then back - which is how you get two mobs to see you on different ticks.
+    // What the player would have to click to walk this recorded path: each run in one direction is
+    // one click, and standing still on the same tile is a wait on the click before it.
+    const clicksFromTicks = (ticks: Coordinates[]) => {
+      const same = (a: Coordinates, b: Coordinates) => a[0] === b[0] && a[1] === b[1];
+      const clicks: SolveClick[] = [];
+      let startDelay = 0;
+      let i = 1;
+      while (i < ticks.length) {
+        if (same(ticks[i], ticks[i - 1])) {
+          if (clicks.length === 0) startDelay++;
+          else clicks[clicks.length - 1].wait++;
+          i++;
+          continue;
+        }
+        const dx = Math.sign(ticks[i][0] - ticks[i - 1][0]);
+        const dy = Math.sign(ticks[i][1] - ticks[i - 1][1]);
+        let j = i;
+        while (
+          j + 1 < ticks.length &&
+          !same(ticks[j + 1], ticks[j]) &&
+          Math.sign(ticks[j + 1][0] - ticks[j][0]) === dx &&
+          Math.sign(ticks[j + 1][1] - ticks[j][1]) === dy
+        ) {
+          j++;
+        }
+        clicks.push({ tile: ticks[j], wait: 0 });
+        i = j + 1;
+      }
+      return { clicks, startDelay };
+    };
+
+    // Off-ticks hinge on timing, so prefer a plan that still flicks with the start a tick late, or
+    // any click a tick early or late.
+    const holdsUp = (route: SolveRoute) => {
+      const { clicks } = route;
+      const variants: Array<SolveRoute | null> = [];
+      if (clicks.length > 0) variants.push(buildRoute(clicks, 1));
+      for (let i = 0; i < clicks.length - 1; i++) {
+        variants.push(buildRoute(clicks.map((c, j) => (j === i ? { ...c, wait: c.wait + 1 } : c))));
+        variants.push(
+          buildRoute(
+            clicks.map((c, j) => (j === i ? (c.wait > 0 ? { ...c, wait: c.wait - 1 } : { ...c, early: true }) : c)),
+          ),
+        );
+      }
+      return variants.every((v) => !v || evaluate(v) !== null);
+    };
+
+    // The community's own movements come first. Where one of them works on this stack it is the
+    // answer: it is the move players have practised and the walkthroughs show, and checking a dozen
+    // of them costs a fraction of searching for a route of our own. Staying put is in here too, so a
+    // stack that is already off-ticked doesn't get moved for nothing.
     add([]);
+    for (const ticks of patterns) {
+      const { clicks, startDelay } = clicksFromTicks(ticks);
+      if (clicks.length === 0) continue;
+      const route = buildRoute(clicks, startDelay);
+      if (!route) continue;
+      route.fromPattern = true;
+      consider(route);
+    }
+    results.sort((a, b) => a.score - b.score);
+    // Stop here only when a known movement is the best thing on the table. Staying put working is
+    // not a reason to stop: a click away there may be a Minotaur worth pulling, and that choice is
+    // worth more than the search time it costs.
+    const known = results[0];
+    if (
+      known?.route.fromPattern &&
+      (!minotaurAlive || known.inReach.some((m) => m[2] === MINOTAUR))
+    ) {
+      const chosen = quick ? known : (results.find((r) => holdsUp(r.route)) ?? known);
+      return { ...chosen, fragile: !quick && !holdsUp(chosen.route), fromGuide: true };
+    }
+
+    // Nothing known fits, so work one out: one click to anywhere close, and A/B steps - out to a
+    // nearby tile, wait, then back - which is how you get two mobs to see you on different ticks.
     for (let y = start[1] - 6; y <= start[1] + 6; y++) {
       for (let x = start[0] - 6; x <= start[0] + 6; x++) {
         if ((x === start[0] && y === start[1]) || !open(x, y)) continue;
@@ -1876,23 +1957,6 @@ export class LineOfSight {
     }
 
     results.sort((a, b) => a.score - b.score);
-
-    // Off-ticks hinge on timing, so prefer a plan that still flicks with the start a tick late, or
-    // any click a tick early or late.
-    const holdsUp = (route: SolveRoute) => {
-      const { clicks } = route;
-      const variants: Array<SolveRoute | null> = [];
-      if (clicks.length > 0) variants.push(buildRoute(clicks, 1));
-      for (let i = 0; i < clicks.length - 1; i++) {
-        variants.push(buildRoute(clicks.map((c, j) => (j === i ? { ...c, wait: c.wait + 1 } : c))));
-        variants.push(
-          buildRoute(
-            clicks.map((c, j) => (j === i ? (c.wait > 0 ? { ...c, wait: c.wait - 1 } : { ...c, early: true }) : c)),
-          ),
-        );
-      }
-      return variants.every((v) => !v || evaluate(v) !== null);
-    };
     let chosen: MetaResult | null = null;
     let fragile = false;
     if (quick) {
@@ -1909,7 +1973,7 @@ export class LineOfSight {
         fragile = true;
       }
     }
-    return chosen ? { ...chosen, fragile } : null;
+    return chosen ? { ...chosen, fragile, fromGuide: false } : null;
   }
 
 
@@ -1922,6 +1986,8 @@ export class LineOfSight {
     return (
       (stay.fragile && !move.fragile) ||
       (stay.plan.tightSwitches > 0 && move.plan.tightSwitches === 0) ||
+      // a movement out of the guide, for no more damage, is worth the walk
+      (move.fromGuide && !stay.fromGuide && move.damage <= stay.damage) ||
       // the walk to the hidden tile counts as a click
       move.route.clicks.length + 1 < stay.route.clicks.length ||
       stay.damage - move.damage >= 5
@@ -1945,8 +2011,35 @@ export class LineOfSight {
     const RANK_BUDGET_MS = 1200;
     type MetaPlan = NonNullable<ReturnType<LineOfSight["findMetaPlan"]>>;
     const isClean = (p: MetaPlan) => !p.fragile && p.damage < 1 && p.plan.tightSwitches === 0;
+    // What a movement out of the guide is worth against one of our own. Big enough to outweigh a
+    // couple of extra clicks, because a route the player has already drilled is worth more than a
+    // tidier one they have to read off the screen - but only paid when the known move is close to
+    // free, so it can never buy a plan that hurts.
+    const PATTERN_BONUS = 5000;
+    const bonus = (p: MetaPlan) => (p.fromGuide && p.damage <= 5 ? PATTERN_BONUS : 0);
 
-    let best = this.findMetaPlan(start, this.mobs);
+    // Every recorded movement, laid over each pillar and mirrored both ways, indexed by the tile it
+    // starts from. A movement is only worth offering from the tile its author stood on, so this is
+    // how a candidate start tile finds the moves that begin there.
+    const patternsByStart = new Map<string, Coordinates[][]>();
+    for (const pattern of OFF_TICK_PATTERNS) {
+      for (const centre of PILLAR_CENTRES) {
+        for (const flipX of [false, true]) {
+          for (const flipY of [false, true]) {
+            const tiles = placePattern(pattern, centre, flipX, flipY);
+            if (tiles.some(([x, y]) => x < 0 || y < 0 || x >= MAP_WIDTH || y >= MAP_HEIGHT)) continue;
+            const key = `${tiles[0][0]},${tiles[0][1]}`;
+            const here = patternsByStart.get(key) ?? [];
+            const shape = tiles.map(([x, y]) => `${x},${y}`).join(">");
+            if (!here.some((t) => t.map(([x, y]) => `${x},${y}`).join(">") === shape)) here.push(tiles);
+            patternsByStart.set(key, here);
+          }
+        }
+      }
+    }
+    const patternsAt = (tile: Coordinates) => patternsByStart.get(`${tile[0]},${tile[1]}`) ?? [];
+
+    let best = this.findMetaPlan(start, this.mobs, false, patternsAt(start));
     let lead: ReturnType<LineOfSight["hiddenMoves"]>[number] | null = null;
 
     if (!this.fromWaveStart && !(best && isClean(best))) {
@@ -1955,16 +2048,20 @@ export class LineOfSight {
       let pick: { move: (typeof moves)[number]; score: number } | null = null;
       for (const move of moves) {
         if (Date.now() > deadline) break;
-        const quick = this.findMetaPlan(move.at, move.mobs, true);
+        const quick = this.findMetaPlan(move.at, move.mobs, true, patternsAt(move.at));
         if (!quick) continue;
-        const score = quick.score + move.cost;
+        // A tile one of the guide's movements starts from is worth walking to: about a click's worth
+        // of preference, because a move the player already knows beats a slightly tidier stranger.
+        const score = quick.score + move.cost - bonus(quick);
         if (!pick || score < pick.score) pick = { move, score };
-        // Nothing further out is going to beat a clean rhythm from here.
-        if (isClean(quick)) break;
+        // Nothing further out beats a clean rhythm from a movement the guide already recorded. A
+        // clean plan of our own is worth keeping, but not worth stopping the search for.
+        if (isClean(quick) && quick.fromGuide) break;
       }
-      if (pick && (!best || pick.score < best.score)) {
-        const plan = this.findMetaPlan(pick.move.at, pick.move.mobs);
-        if (plan && (!best || (plan.score + pick.move.cost < best.score && this.isWorthMovingMeta(best, plan)))) {
+      if (pick && (!best || pick.score < best.score - bonus(best))) {
+        const plan = this.findMetaPlan(pick.move.at, pick.move.mobs, false, patternsAt(pick.move.at));
+        const allowance = plan ? bonus(plan) : 0;
+        if (plan && (!best || (plan.score + pick.move.cost - allowance < best.score && this.isWorthMovingMeta(best, plan)))) {
           best = plan;
           lead = pick.move;
         }
@@ -2043,7 +2140,8 @@ export class LineOfSight {
           : `Stay where you are.${damageText}`
         : `${walkToStart}${lead ? "Then " : ""}${clickCount} click${clickCount === 1 ? "" : "s"}, ${routeTicks} tick${routeTicks === 1 ? "" : "s"}.` +
           (timed.clicks.some((c) => c.wait > 0) ? " Wait where it says." : "") +
-          damageText;
+          damageText +
+          (best.fromGuide ? " This is the community guide's own move." : "");
 
     // Replay a little past arrival so you can watch the rhythm form on the tick strip.
     const end = ticks[ticks.length - 1];
